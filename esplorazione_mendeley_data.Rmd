@@ -1,0 +1,95 @@
+---
+title: "Esplorazione Mendeley dataset"
+author: "Valerio Reffo"
+date: "2026-01-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(spatstat)
+```
+
+
+```{r}
+dat = read_csv("dataset/CRC_clusters_neighborhoods_markers.csv")
+pat1 <- dat[dat$patients == 1,]
+pat1 |> ggplot(aes(`X:X`, `Y:Y`, color = `neighborhood name`)) + geom_point()
+```
+
+```{r}
+table(dat$patients)
+```
+
+```{r}
+table(dat$Region, dat$patients)
+```
+
+Ci sono 2 regioni per ogni paziente
+
+```{r}
+pat1[pat1$Region=="reg001",] |> 
+  ggplot(aes(`X:X`, `Y:Y`, color = `neighborhood name`)) + geom_point()
+```
+
+```{r}
+pat1[pat1$Region=="reg002",] |> 
+  ggplot(aes(`X:X`, `Y:Y`, color = `neighborhood name`)) + geom_point()
+```
+
+# Pulizia e sistemazione dataset
+
+Inserisco una variabile per identificare le due regioni per ogni paziente
+
+```{r}
+dat_ranked <- dat |> 
+  group_by(patients) |> 
+  mutate(region_rank = dense_rank(Region)) |> 
+  ungroup()
+```
+
+Aggiungo variabili più leggibili
+
+```{r}
+# 1 pixel == 0.18 micron
+dat_ranked$x_px <- dat_ranked$`X:X`
+dat_ranked$y_px <- dat_ranked$`Y:Y`
+dat_ranked$cell_type = dat_ranked$`neighborhood name`
+```
+
+Separo i dataset per le due regioni per ogni paziente, in modo da avere un dataset con la prima regione per tutti i pazienti e un altro per la seconda regione per tutti i pazienti.
+
+```{r}
+# 2. Extract the first dataset (Rank 1 regions)
+dat_gr1 <- dat_ranked %>%
+  filter(region_rank == 1) %>%
+  select(-region_rank) # remove the helper column
+
+# 3. Extract the second dataset (Rank 2 regions)
+dat_gr2 <- dat_ranked %>%
+  filter(region_rank == 2) %>%
+  select(-region_rank) # remove the helper column
+```
+
+Scheletro della funzione per creare gli oggetti ppp
+
+```{r}
+# finestra
+wnd_px <- owin(c(min(dati$x_px), max(dati$x_px)), 
+                c(min(dati$y_px), max(dati$y_px)))
+# oggetto ppp
+ppp_pats <- ppp(x = dati$x_px, y = geni$y_px, 
+                window = wnd_px, marks = dati$cell_type)
+unitname(ppp_pats) <- c("pixel","pixels")
+ppp_pats <- unique.ppp(ppp_pats)
+
+```
+
+
+

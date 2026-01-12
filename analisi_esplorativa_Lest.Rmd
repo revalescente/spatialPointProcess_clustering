@@ -1,0 +1,668 @@
+---
+title: "Analisi Esplorativa - Parte Uno"
+author: "Valerio Reffo"
+date: "2024-11-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, message = F, warning = F}
+library(spatstat)
+library(ggplot2)
+library(arrow)
+library(fda)
+library(tidyverse)
+library(msigdbr)
+library(knitr)
+library(ggdendro)
+```
+
+Proviamo a rifare il clustering tramite funzione L anziché la funzione PCF, sebbene sia indicata come preferibile, per condurre questo tipo di analisi, i risultati sono piuttosto insoddisfacenti.
+
+```{r dati}
+full_data <- read_ppp()
+```
+
+# Analisi Esplorativa singoli geni
+
+```{r}
+Lfun_obj <- Lest_smooth(full_data$geni, rmax = 20, centrata = T)
+```
+
+Grafico L stimate sui geni singolarmente, distanza massima considerata rmax = 20
+
+```{r}
+plot(Lfun_obj$fd)
+lines(c(0,20), c(0,20), col = "gold", lwd = 2)
+plot(Lfun_obj$fd, xlim = c(0,2))
+lines(c(0,20), c(0,20), col = "gold", lwd = 2)
+```
+
+
+```{r}
+wbasisLM = create.bspline.basis(c(1,18), 4, 3,
+c(1,PGSctrmean,18))
+WfdLM = fd(matrix(0,4,1),wbasisLM)
+WfdParLM = fdPar(WfdLM,1,1e-12)
+```
+
+
+```{r}
+regListLM = landmarkreg(Lfun_obj$fd, PGSctr,
+PGSctrmean, WfdParLM, TRUE)
+accelfdLM = regListLM$regfd
+accelmeanfdLM = mean(accelfdLM)
+warpfdLM = regList$warpfd
+WfdLM = regList$Wfd
+```
+
+ 
+## Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca <- pca.fd(Lfun_obj$fd, nharm = 4, Lfun_obj$fdPar)
+rownames(fpca$scores) <- levels(ppp_geni$marks)
+
+fpcaVarmx <- varmx.pca.fd(fpca)
+```
+
+### fPCA plot
+
+```{r}
+plot(fpca)
+```
+
+
+### fPCA plot ruotate per VARIMAX
+
+```{r}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gearchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 5)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 5)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+plot(dhc, cex = 0.1, horiz = T)
+ggdendrogram(dhc, rotate = TRUE, size = 2)
+table(fpca_km$cluster)
+table(memb)
+```
+
+
+```{r}
+plot(fpca$scores[,1], fpca$scores[,2], col = memb, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,3], col = memb, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,4], col = memb, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,5], col = memb, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+## Caratterizzazione cluster
+
+Aggiungiamo phase-plane plot con curve medie cluster? 
+asse x: funzione K, asse y: pcf (che è proprio la sua derivata)
+
+### Esplorazione Cluster
+
+```{r}
+genicluster <- as.matrix(cbind(levels(ppp_geni$marks), memb_rinum, memb_rinum))
+colnames(genicluster) <- c("Geni", "hc2", "hc")
+
+# gruppi clustering Gerarchico Ward
+gr1 <- genicluster[genicluster[,3] == "1",1]
+gr2 <- genicluster[genicluster[,3] == "2",1]
+gr3 <- genicluster[genicluster[,3] == "3",1]
+gr4 <- genicluster[genicluster[,3] == "4",1]
+gr5 <- genicluster[genicluster[,3] == "5",1]
+gr6 <- genicluster[genicluster[,3] == "6",1]
+gr7 <- genicluster[genicluster[,3] == "7",1]
+gr8 <- genicluster[genicluster[,3] == "8",1]
+```
+
+#### Grafici 
+
+##### funzioni L medie per ciascun cluster 
+
+```{r}
+# funzione che calcola la media funzionale per ogni cluster
+mean_cluster_fd <- function(Lfun_obj, dfgruppi, dist_r = seq(0,20, length.out = 500))
+{
+  # dfgruppi è il dataframe con i gruppi "genicluster" [geni, kmeans, hc]
+  gr1 <- dfgruppi[dfgruppi[,3] == "1",1]
+  gr2 <- dfgruppi[dfgruppi[,3] == "2",1]
+  gr3 <- dfgruppi[dfgruppi[,3] == "3",1]
+  gr4 <- dfgruppi[dfgruppi[,3] == "4",1]
+  gr5 <- dfgruppi[dfgruppi[,3] == "5",1]
+  list_mat_gr <- Lfun_obj$mat[,gr1]
+  list_mat_gr <- lapply(list(gr1, gr2, gr3, gr4, gr5), function(x)
+    Lfun_obj$mat[,x])
+  # forma funzionale
+  list_grmean_fd <- lapply(list_mat_gr, function(x)
+    mean.fd(smooth.basis(Lfun_obj$r, x, Lfun_obj$fdPar)$fd))
+  
+  plot_data <- lapply(clustmedi, function(x)
+    eval.fd(dist_r, x)) |> as.data.frame()
+  plot_data <- sweep(plot_data, 1, dist_r, "-")
+  colnames(plot_data) <- c("gr1", "gr2", "gr3", "gr4", "gr5")
+  plot_data <- cbind(plot_data,dist_r)
+
+  return(list(list_grmean_fd = list_grmean_fd, data_plot = plot_data))
+}
+```
+
+```{r}
+clustmedi <- mean_cluster_fd(Lfun_obj, genicluster)
+
+clustmedi$data_plot |>   # Creiamo la variabile x (l'asse orizzontale)
+  pivot_longer(cols = -dist_r, names_to = "Cluster", values_to = "Lmean") |> 
+  ggplot(aes(x = dist_r, y = Lmean, color = Cluster)) +
+  geom_line(linewidth = 0.7) +  # Disegna le curve
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 0.7) +
+  theme_minimal() +  # Tema pulito
+  labs(title = "Curve medie dei cluster",
+       subtitle = "Funzione L centrata",
+       x = "r (micron)",
+       y = expression(L(r) - r),
+       color = "Cluster") +  # Legenda con i nomi delle colonne
+  theme_ipsum(axis_title_size = 10, axis = TRUE, axis_col = "black", 
+              grid = FALSE)
+```
+
+
+##### Intensità media per ciascun cluster
+
+Procediamo prendendo il processo di punto aggregato per tutti i geni del cluster di riferimento e stimando l'intensità tramite kernel con il metodo di Diggle (GCV)
+
+```{r}
+ppp_gr <- subset(ppp_geni, marks %in% gr1)
+ppp_gr$marks <- factor(ppp_gr$marks)
+sig <- bw.diggle(ppp_gr)
+dens_gr1 <- density(ppp_gr, sigma = sig)
+
+ppp_gr <- subset(ppp_geni, marks %in% gr2)
+ppp_gr$marks <- factor(ppp_gr$marks)
+sig <- bw.diggle(ppp_gr)
+dens_gr2 <- density(ppp_gr, sigma = sig)
+
+ppp_gr <- subset(ppp_geni, marks %in% gr3)
+ppp_gr$marks <- factor(ppp_gr$marks)
+sig <- bw.diggle(ppp_gr)
+dens_gr3 <- density(ppp_gr, sigma = sig)
+
+ppp_gr <- subset(ppp_geni, marks %in% gr4)
+ppp_gr$marks <- factor(ppp_gr$marks)
+sig <- bw.diggle(ppp_gr)
+dens_gr4 <- density(ppp_gr, sigma = sig)
+
+ppp_gr <- subset(ppp_geni, marks %in% gr5)
+ppp_gr$marks <- factor(ppp_gr$marks)
+sig <- bw.diggle(ppp_gr)
+dens_gr5 <- density(ppp_gr, sigma = sig)
+
+# dens_gruppi <- anylist(dens_gr1, dens_gr2, dens_gr3, dens_gr4)
+plot(anylist(dens_gr1, dens_gr2, dens_gr3, dens_gr4, dens_gr5), main = "Densità Cluster", main.panel = c("Gruppo1", "Gruppo2", "Gruppo3", "Gruppo4", "Gruppo5"),
+     hsep=1, equal.scales=F, box=F)
+
+```
+
+
+### Gene Set Enrichment Analysis
+
+Proviamo a caratterizzare i geni tramite GSEA.
+
+Funzione per testare i gene sets
+```{r, echo = T}
+gsea <- function(genes, background, geneSets, n=20, minSize=5, name=NULL){
+  ### filter background to only include genes that we assessed.
+  geneSets <- geneSets[geneSets$gene_symbol %in% background,]
+  m_list <- geneSets %>% split(x = .$gene_symbol, f = .$gs_name)
+  # gene set must have at least minSize genes in background.
+  m_list <- m_list[unlist(lapply(m_list, length)) >= minSize]
+  
+  overlapPval <- unlist(lapply(m_list, function(gs){
+    # genes in community and gene set
+    inBoth <- sum(genes %in% gs)
+    # genes in community and not in gene set
+    inComOnly <- length(genes) - inBoth
+    # genes in background and gene set
+    inGsBack <- sum(background %in% gs)
+    # genes in background and not in gene set
+    outGsBack <- length(background) - inGsBack
+    m <- matrix(c(inBoth, inComOnly,
+                  inGsBack, outGsBack),
+                nrow =2, ncol=2, byrow=TRUE,
+                dimnames = list(c("in community", "out community"),
+                                c("in gene set", "out gene set")))
+    fis <- fisher.test(m, alternative = "greater")
+    pval <- fis$p.value
+    return(pval)
+  }))
+  padj <- p.adjust(overlapPval, "fdr")
+  oo <- order(overlapPval, decreasing=FALSE)
+  res <- data.frame(geneSet = names(m_list)[oo[1:n]],
+                    pval = overlapPval[oo[1:n]],
+                    padj = padj[oo[1:n]],
+                    row.names = NULL)
+  kable(res, caption=name, label=name)
+}
+```
+
+Confrontiamo i cluster con tutti i 960 geni target.
+
+Categorie provate: 
+H: 1 hallmark significativo al 10%
+C1: nulla
+C2: SI!
+C3: nulla
+C4: 1 significativo
+c5: nulla
+C6: nulla
+c7: nulla
+C8: Qualcosa
+
+```{r, echo = T}
+geni_target <- genicluster[,1]
+geneSets <- msigdbr(species = "Homo sapiens", category = "C8") #subcategory = "CP")
+```
+
+```{r, echo = T}
+## gene set enrichment sui risultati del clustering kmeans 
+#ncl <- length(unique(comHBCAct$membership))
+ncl <- length(unique(memb))
+kab <- list()
+# kabNames <- c("Krt / cell cycle / stimulus",
+#                 "Chromatin",
+#                 "Epigenetics, cell cycle",
+#                 "Cell cycle")
+for(kk in 1:ncl)
+{
+  # genes <- rownames(adjHBCAct2)[which(comHBCAct$membership == kk)]
+  genes <- geni_target[which(memb == kk)]
+  kab[[kk]] <- gsea(genes = genes,
+                    background = geni_target,
+                    geneSets = geneSets)
+}
+kab
+```
+## GeneSets significativi:
+
+### Cluster 4:
+#### H:
+HALLMARK_KRAS_SIGNALING_UP	0.0019727	0.0907423
+
+#### C2:
+EHRLICH_ICF_SYNDROM_UP	0.0000271	0.0956894
+
+#### C4:
+MODULE_118	0.0001551	0.0455522
+MODULE_2	0.0002971	0.0455522
+MODULE_44	0.0002971	0.0455522
+MODULE_12	0.0006888	0.0751370
+MODULE_53	0.0008167	0.0751370
+MODULE_84	0.0011148	0.0854684
+
+### Cluster 3:
+#### C2
+TURASHVILI_BREAST_LOBULAR_CARCINOMA_VS_DUCTAL_NORMAL_UP	0.0000003	0.0011210
+SCHUETZ_BREAST_CANCER_DUCTAL_INVASIVE_UP	0.0000012	0.0021734
+ANASTASSIOU_MULTICANCER_INVASIVENESS_SIGNATURE	0.0000038	0.0045058
+TURASHVILI_BREAST_LOBULAR_CARCINOMA_VS_LOBULAR_NORMAL_DN	0.0000192	0.0138339
+PID_SYNDECAN_1_PATHWAY	0.0000196	0.0138339
+LUI_THYROID_CANCER_CLUSTER_4	0.0000262	0.0154382
+NABA_CORE_MATRISOME	0.0000911	0.0459351
+REACTOME_DEGRADATION_OF_THE_EXTRACELLULAR_MATRIX	0.0001191	0.0525562
+REACTOME_COLLAGEN_DEGRADATION	0.0001537	0.0570034
+POOLA_INVASIVE_BREAST_CANCER_UP	0.0001614	0.0570034
+NABA_COLLAGENS	0.0002101	0.0618142
+REACTOME_COLLAGEN_CHAIN_TRIMERIZATION	0.0002101	0.0618142
+NAKAYAMA_SOFT_TISSUE_TUMORS_PCA1_UP	0.0002375	0.0645051
+PID_AVB3_INTEGRIN_PATHWAY	0.0002923	0.0737275
+REACTOME_COLLAGEN_BIOSYNTHESIS_AND_MODIFYING_ENZYMES	0.0003488	0.0798719
+TURASHVILI_BREAST_DUCTAL_CARCINOMA_VS_LOBULAR_NORMAL_UP	0.0003619	0.0798719
+MCLACHLAN_DENTAL_CARIES_UP	0.0003952	0.0820906
+ONDER_CDH1_TARGETS_2_UP	0.0004349	0.0853054
+RODWELL_AGING_KIDNEY_UP	0.0004976	0.0924664
+
+#### C4:
+MODULE_47	0.0000322	0.0148296
+GNF2_CDH11	0.0002442	0.0561665
+MODULE_84	0.0005809	0.0890639
+MODULE_122	0.0007956	0.0914955
+MODULE_174	0.0010547	0.0970369
+
+#### C8:
+CUI_DEVELOPING_HEART_COMPACT_VENTRICULAR_CARDIOMYOCYTE	0.0000078	0.0040494
+DESCARTES_FETAL_EYE_STROMAL_CELLS	0.0000262	0.0067949
+AIZARANI_LIVER_C21_STELLATE_CELLS_1	0.0004265	0.0578120
+AIZARANI_LIVER_C33_STELLATE_CELLS_2	0.0004526	0.0578120
+CUI_DEVELOPING_HEART_C3_FIBROBLAST_LIKE_CELL	0.0005570	0.0578120
+
+
+
+#### Gruppo 1
+
+```{r}
+ppp_gr1 <- subset(ppp_geni, marks %in% gr1)
+ppp_gr1$marks <- factor(ppp_gr1$marks)
+levels(ppp_gr1$marks)
+round(range(summary(ppp_gr1)$marks$intensity),4)
+range(summary(ppp_gr1)$marks$frequency)
+
+hist(summary(ppp_gr1)$marks$frequency, breaks = 1000, main = paste("GR1 range:", 
+      range(summary(ppp_gr1)$marks$frequency)[1],"-",
+      range(summary(ppp_gr1)$marks$frequency)[2]))
+
+```
+
+```{r, echo=FALSE,results='hide',fig.keep='last'}
+Lhat_gr1 <- lapply(split(ppp_gr1), Lest, correction = "best", rmax = 20)
+plot(Lhat_gr1[[1]], ylim = c(-20,80), legend = F, main = "cluster 1")
+lapply(Lhat_gr1, function(x) plot(x, add = T))
+lines(c(0,20), c(0,20), col = "gold", lwd = 1.5)
+plot(clustmedi[[1]], add = T, col = "green", lwd = 2)
+
+```
+
+
+#### Gruppo 2
+
+```{r}
+ppp_gr2 <- subset(ppp_geni, marks %in% gr2)
+ppp_gr2$marks <- factor(ppp_gr2$marks)
+levels(ppp_gr2$marks)
+round(range(summary(ppp_gr2)$marks$intensity),4)
+range(summary(ppp_gr2)$marks$frequency)
+
+hist(summary(ppp_gr2)$marks$frequency, breaks = 50, main = paste("GR2 range:", 
+       range(summary(ppp_gr2)$marks$frequency)[1],"-",                                range(summary(ppp_gr2)$marks$frequency)[2]))
+```
+
+```{r, echo=FALSE,results='hide',fig.keep='last'}
+Lhat_gr2 <- lapply(split(ppp_gr2), Lest, correction = "best", rmax = 50)
+plot(Lhat_gr2[[1]], ylim = c(-10,60), legend = F, main = "cluster 2")
+lapply(Lhat_gr2, function(x) plot(x, add = T))
+lines(c(0,20), c(0,20), col = "gold", lwd = 1.5)
+plot(clustmedi[[2]], add = T, col = "green", lwd = 2)
+```
+
+#### Gruppo 3
+
+```{r}
+ppp_gr3 <- subset(ppp_geni, marks %in% gr3)
+ppp_gr3$marks <- factor(ppp_gr3$marks)
+levels(ppp_gr3$marks)
+round(range(summary(ppp_gr3)$marks$intensity),4)
+range(summary(ppp_gr3)$marks$frequency)
+
+hist(summary(ppp_gr3)$marks$frequency, breaks = 15, main = paste("GR3 range:", 
+      range(summary(ppp_gr3)$marks$frequency)[1],"-",
+      range(summary(ppp_gr3)$marks$frequency)[2]))
+
+```
+
+```{r, echo=FALSE,results='hide',fig.keep='last'}
+Lhat_gr3 <- lapply(split(ppp_gr3), Lest, correction = "best", rmax = 20)
+plot(Lhat_gr3[[1]], ylim = c(0, 50), legend = F, main = "cluster 3")
+lapply(Lhat_gr3, function(x) plot(x, add = T))
+lines(c(0,20), c(0,20), col = "gold", lwd = 1.5)
+plot(clustmedi[[3]], add = T, col = "green", lwd = 2)
+```
+
+
+#### Gruppo 4
+
+```{r}
+ppp_gr4 <- subset(ppp_geni, marks %in% gr4)
+ppp_gr4$marks <- factor(ppp_gr4$marks)
+levels(ppp_gr4$marks)
+round(range(summary(ppp_gr4)$marks$intensity),4)
+range(summary(ppp_gr4)$marks$frequency)
+
+hist(summary(ppp_gr4)$marks$frequency, breaks = 10, main = paste("GR4 range:", 
+      range(summary(ppp_gr4)$marks$frequency)[1],"-",
+      range(summary(ppp_gr4)$marks$frequency)[2]))
+
+```
+
+```{r, echo=FALSE,results='hide',fig.keep='last'}
+Lhat_gr4 <- lapply(split(ppp_gr4), Lest, correction = "best", rmax = 20)
+plot(Lhat_gr4[[1]], ylim = c(0, 80), legend = F, main = "cluster 4")
+lapply(Lhat_gr4, function(x) plot(x, add = T))
+lines(c(0,20), c(0,20), col = "gold", lwd = 1.5)
+plot(clustmedi[[4]], add = T, col = "green3", lwd = 2)
+```
+
+
+#### Gruppo 5
+
+```{r}
+ppp_gr5 <- subset(ppp_geni, marks %in% gr5)
+ppp_gr5$marks <- factor(ppp_gr5$marks)
+levels(ppp_gr5$marks)
+round(range(summary(ppp_gr5)$marks$intensity),4)
+range(summary(ppp_gr5)$marks$frequency)
+
+hist(summary(ppp_gr5)$marks$frequency, breaks = 5, main = paste("GR5 range:", 
+      range(summary(ppp_gr5)$marks$frequency)[1],"-",
+      range(summary(ppp_gr5)$marks$frequency)[2]))
+
+```
+
+```{r, echo=FALSE,results='hide',fig.keep='last'}
+Lhat_gr5 <- lapply(split(ppp_gr5), Lest, correction = "best", rmax = 20)
+plot(Lhat_gr5[[1]], legend = F, main = "cluster 5")
+lapply(Lhat_gr5, function(x) plot(x, add = T))
+lines(c(0,20), c(0,20), col = "gold", lwd = 1.5)
+plot(clustmedi[[5]], add = T, col = "green", lwd = 2)
+
+plot(ppp_gr5)
+```
+
+
+# Approfondimento CLUSTERING
+
+## Modo 1
+Togliamo i geni più strani e rifacciamo il clustering su tutto
+
+selezioniamo i geni da rimuovere
+```{r}
+marks(ppp_geni)
+gen_rem <- c(gr5, gr4)
+
+`%notin%` <- Negate(`%in%`)
+
+ppp_tmp <- subset(ppp_geni, marks %notin% gen_rem, drop = T)
+which(levels(marks(ppp_tmp)) %in% gen_rem)
+```
+
+e rifacciamo il clustering
+```{r}
+Lfun_tmp <- Lest_smooth(ppp_tmp, rmax = 20)
+fpca_tmp <- pca.fd(Lfun_tmp$fd, nharm = 4, Lfun_tmp$fdPar)
+rownames(fpca_tmp$scores) <- levels(ppp_tmp$marks)
+set.seed(123)
+fpca_hc_tmp <- hclust(dist(fpca_tmp$scores[,c(1,4)]), method = "ward.D2")
+memb_tmp <- cutree(fpca_hc_tmp, k = 5)
+table(memb_tmp)
+```
+
+```{r}
+dhc <- as.dendrogram(fpca_hc_tmp)
+plot(dhc, cex = 0.2, horiz = F)
+```
+
+
+```{r}
+plot(fpca_tmp)
+
+plot(fpca_tmp$scores[,1], fpca_tmp$scores[,2], col = memb_tmp, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+plot(fpca_tmp$scores[,2], fpca_tmp$scores[,3], col = memb_tmp, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+plot(fpca_tmp$scores[,3], fpca_tmp$scores[,4], col = memb_tmp, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+```
+
+```{r}
+genicluster_tmp <- as.matrix(cbind(levels(ppp_tmp$marks),c(1), memb_tmp))
+colnames(genicluster_tmp) <- c("Geni","uno", "hc")
+```
+
+```{r}
+clustmedi_tmp <- mean_cluster_fd(Lfun_tmp, genicluster_tmp)
+grafico_meanfd(clustmedi_tmp)
+```
+
+GSEA
+```{r}
+geni_target <- genicluster[,1]
+geneSets <- msigdbr(species = "Homo sapiens", category = "C8") #subcategory = "CP")
+ncl <- length(unique(memb))
+kab <- list()
+# kabNames <- c("Krt / cell cycle / stimulus",
+#                 "Chromatin",
+#                 "Epigenetics, cell cycle",
+#                 "Cell cycle")
+for(kk in 1:ncl)
+{
+  # genes <- rownames(adjHBCAct2)[which(comHBCAct$membership == kk)]
+  genes <- geni_target[which(memb_tmp == kk)]
+  kab[[kk]] <- gsea(genes = genes,
+                    background = geni_target,
+                    geneSets = geneSets)
+}
+kab
+```
+
+Categorie provate: 
+H: 
+C1: 
+C2: 
+C3: 
+C4: 
+c5: 
+C6: 
+c7: 
+C8: 
+
+ma non c'è nulla di utilizzabile. Ho testato i gruppi su tutti i geni, senza eliminare i geni precedentemente rimossi dal clustering.
+
+## Modo 2
+Rifacciamo il clustering sui gruppi più numerosi
+
+### Gruppo 2
+
+Sono 213 geni, proviamo a suddividerli ulteriormente.
+```{r}
+ppp_tmp <- subset(ppp_geni, marks %in% gr2, drop = T)
+which(levels(marks(ppp_tmp)) %notin% gr2)
+```
+
+e rifacciamo il clustering
+```{r}
+Lfun_tmp <- Lest_smooth(ppp_tmp, rmax = 20)
+fpca_tmp <- pca.fd(Lfun_tmp$fd, nharm = 4, Lfun_tmp$fdPar)
+rownames(fpca_tmp$scores) <- levels(ppp_tmp$marks)
+set.seed(123)
+fpca_hc_tmp <- hclust(dist(fpca_tmp$scores[,c(1,4)]), method = "ward.D2")
+memb_tmp <- cutree(fpca_hc_tmp, k = 6)
+table(memb_tmp)
+```
+
+```{r}
+dhc <- as.dendrogram(fpca_hc_tmp)
+plot(dhc, cex = 0.2, horiz = F)
+```
+
+```{r}
+plot(fpca_tmp)
+
+plot(fpca_tmp$scores[,1], fpca_tmp$scores[,2], col = memb_tmp, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+plot(fpca_tmp$scores[,2], fpca_tmp$scores[,3], col = memb_tmp, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+plot(fpca_tmp$scores[,3], fpca_tmp$scores[,4], col = memb_tmp, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+```
+
+```{r}
+genicluster_tmp <- as.matrix(cbind(levels(ppp_tmp$marks),c(1), memb_tmp))
+colnames(genicluster_tmp) <- c("Geni","uno", "hc")
+```
+
+```{r}
+clustmedi_tmp <- mean_cluster_fd(Lfun_tmp, genicluster_tmp)
+grafico_meanfd(clustmedi_tmp)
+```
+
+GSEA
+```{r}
+geni_target <- genicluster[,1]
+geneSets <- msigdbr(species = "Homo sapiens", category = "C7") #subcategory = "CP")
+ncl <- length(unique(memb))
+kab <- list()
+# kabNames <- c("Krt / cell cycle / stimulus",
+#                 "Chromatin",
+#                 "Epigenetics, cell cycle",
+#                 "Cell cycle")
+for(kk in 1:ncl)
+{
+  # genes <- rownames(adjHBCAct2)[which(comHBCAct$membership == kk)]
+  genes <- geni_target[which(memb_tmp == kk)]
+  kab[[kk]] <- gsea(genes = genes,
+                    background = geni_target,
+                    geneSets = geneSets)
+}
+kab
+```
+
+Categorie provate: 
+H: 
+C1: 
+C2: 
+C3: 
+C4: 
+c5: 
+C6: 
+c7: 
+C8:
+
+nulla.
