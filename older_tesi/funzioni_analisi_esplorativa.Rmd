@@ -1,0 +1,103 @@
+---
+title: "Funzioni per analisi esplorativa"
+author: "Valerio Reffo"
+date: "2025-06-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = F, warning = F}
+library(spatstat)
+library(ggplot2)
+library(arrow)
+library(fda)
+library(tidyverse)
+library(msigdbr)
+library(knitr)
+```
+
+Funzione per lettura dati, otteniamo 3 oggetti ppp, tutti i geni, solo i negative probe, e i geni indistinti assieme ai negP.
+```{r}
+read_ppp <- function(fov = "1", path_dati = "~/TESI/DATI/parquet_library/lung6/fov/", scale_factor = 0.18)
+{
+  path_full <- paste0(path_dati, "fov=", fov, "/part-0.parquet")
+  dati <- read_parquet(path_full, as_data_frame = T)
+  dati$NegProbe <- ifelse(grepl("NegPrb", dati$target), "NegPrb", "Altro")
+  
+  # 1 pixel == 0.18 micron
+  dati$x_local_mum <- dati$x_local_px*scale_factor
+  dati$y_local_mum <- dati$y_local_px*scale_factor
+  
+  geni <- dati[dati$NegProbe == "Altro",]
+  geni$NegProbe <- NULL
+  geni$target <- factor(geni$target)
+  dati$target <- factor(dati$target)
+  NegP <- dati[dati$NegProbe == "NegPrb",]
+  NegP$NegProbe <- NULL
+  NegP$target <- NULL
+  # finestra
+  Wnd_mum <- owin(c(min(dati$x_local_mum), max(dati$x_local_mum)), 
+                  c(min(dati$y_local_mum), max(dati$y_local_mum)))
+  # Solo GENI
+  ppp_geni <- ppp(x = geni$x_local_mum, y = geni$y_local_mum, 
+                 window = Wnd_mum, marks = geni$target)
+  unitname(ppp_geni) <- c("micron","microns")
+  ppp_geni <- unique.ppp(ppp_geni)
+  # Solo NEG PROBE
+  ppp_neg <- ppp(x = NegP$x_local_mum, y = NegP$y_local_mum, 
+                 window = Wnd_mum)
+  unitname(ppp_neg) <- c("micron","microns")
+  ppp_neg <- unique.ppp(ppp_neg)
+  # ppp generico
+  ppp_tot <- ppp(x = dati$x_local_mum, y = dati$y_local_mum, 
+                 window = Wnd_mum, marks = dati$NegProbe)
+  unitname(ppp_tot) <- c("micron","microns")
+  ppp_tot <- unique.ppp(ppp_tot)
+  return(list(geni = ppp_geni, negP = ppp_neg, tot = ppp_tot))
+}
+```
+
+Funzione per stimare Besag's L-function in forma funzionale
+```{r}
+Lest_smooth <- function(ppp_geni, rmax = 20, M = 6, genLfun.fd = 4, centrata = F)
+{
+  if(centrata == F){
+    Lfun <- lapply(split(ppp_geni), Lest, correction = "best", rmax = rmax)
+    mat_Lfun <- sapply(Lfun, function(x) x$iso)
+    r <- Lfun[[1]]$r
+    K <- length(r) + M - 2
+    genbasis <- create.bspline.basis(range(r), K, M, r)
+    genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+    genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+    Lfun.fd <- genfdSmooth$fd
+    fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+    fdnames <- list(fdn_dist,
+                    "Gene" = levels(ppp_geni$marks),
+                    "Funzione L")
+    Lfun.fd$fdnames <- fdnames
+  } else {
+    Lfun <- lapply(split(ppp_geni), Lest, correction = "best", rmax = rmax)
+    r <- Lfun[[1]]$r
+    # centriamo Lfun
+    mat_Lfun <- sapply(Lfun, function(x) x$iso) |> 
+      sweep(MARGIN = 1, STATS = r, FUN = "-")
+    K <- length(r) + M - 2
+    genbasis <- create.bspline.basis(range(r), K, M, r)
+    genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+    genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+    Lfun.fd <- genfdSmooth$fd
+    fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+    fdnames <- list(fdn_dist,
+                    "Gene" = levels(ppp_geni$marks),
+                    "Funzione L")
+    Lfun.fd$fdnames <- fdnames
+  }
+  return(list(fd = Lfun.fd, fdPar = genfdPar, 
+                basis = genbasis, mat = mat_Lfun, r = r))
+}
+
+```
+

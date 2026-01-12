@@ -14,6 +14,8 @@ library(readr)
 library(ggplot2)
 library(dplyr)
 library(spatstat)
+library(tidyverse)
+library(purrr)
 ```
 
 
@@ -77,19 +79,140 @@ dat_gr2 <- dat_ranked %>%
   select(-region_rank) # remove the helper column
 ```
 
-Scheletro della funzione per creare gli oggetti ppp
+Salvo i due dataset separatamente
+```{r}
+#saveRDS(dat_gr1, file = "dataset/patients_region1.rds")
+#saveRDS(dat_gr2, file = "dataset/patients_region2.rds")
+rm(list=ls())
+```
+
+Rileggo i dati puliti
+```{r}
+dati <- readRDS("dataset/patients_region1.rds")
+```
+
+2. Split dataset into a list of dataframes (one per patient)
 
 ```{r}
-# finestra
-wnd_px <- owin(c(min(dati$x_px), max(dati$x_px)), 
-                c(min(dati$y_px), max(dati$y_px)))
-# oggetto ppp
-ppp_pats <- ppp(x = dati$x_px, y = geni$y_px, 
-                window = wnd_px, marks = dati$cell_type)
-unitname(ppp_pats) <- c("pixel","pixels")
-ppp_pats <- unique.ppp(ppp_pats)
-
+patients_list <- split(dati, dati$patients)
 ```
 
 
+3. Apply the function to each patient
+
+```{r}
+ppp_pats <- map(patients_list, function(pat) {
+  # Note: Ensure 'cell_type' column exists in your data. 
+  # If it is named 'ClusterID' or something else, update it here.
+  celltypes <- as.factor(pat$cell_type)
+  ppp_creation(pat, celltypes)
+})
+
+# Check the result
+# ppp_pats is now a list of ppp objects, named by patient ID
+print(names(ppp_pats))
+```
+
+There are NA in some marks and there are duplicated points. The pcf estimate isn't bothered with the duplicated points, but Lest and other functions may be.
+The NA will be accounted for in the functions estimate.
+
+# Omogeneus processes hypotesis
+
+## Lest estimate
+```{r}
+Lest_list <- map(ppp_pats, function(pat){
+  map(split(pat), function(ppp_mark){ 
+    Lest(ppp_mark, correction = "best")})
+})
+```
+
+### Plots
+
+Data preparation
+```{r}
+plot_data <- imap_dfr(Lest_list, function(regions_list, patient_id) {
+  imap_dfr(regions_list, function(fv_data, region_name) {
+    
+    # Extract data and calculate L(r) - r
+    as.data.frame(fv_data) %>%
+      select(r, iso) %>%
+      mutate(
+        PatientID = as.character(patient_id),
+        Region = region_name,
+        # The specific transformation you requested:
+        L_centered = iso - r 
+      )
+  })
+})
+```
+
+and actual plots
+```{r}
+# Create a list of plots
+patient_plots <- plot_data %>%
+  group_by(PatientID) %>%
+  group_map(function(data, keys) {
+    
+    ggplot(data, aes(x = r, y = L_centered, color = Region)) +
+      # Add reference line at 0 (Theoretical Random distribution)
+      geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.5) +
+      # Plot the curves
+      geom_line(linewidth = 0.8, na.rm = TRUE) + 
+      scale_color_brewer(palette = "Set1") +
+      theme_bw() +
+      labs(
+        title = paste("Patient:", keys$PatientID),
+        subtitle = "Centered L-function",
+        y = "L(r) - r",
+        x = "Radius (r)",
+        color = "Region"
+      )
+  }, .keep = TRUE) # .keep=TRUE ensures grouping variable is retained if needed
+```
+
+```{r}
+Lest_pplots <- Lest_plot(Lest_list)
+walk(Lest_pplots, print)
+```
+
+## Pair correlation function
+
+Verify if divisor_fun works as intended
+
+```{r}
+sapply(ppp_pats, divisor_h)
+```
+
+Hybrid estimator of the pcf. If the H0 of CSR in the clark evans test is rejected we use the new pcf estimator made by Baddeley ("a"), otherwise we use the standard corrected near zero.
+
+```{r}
+pcf_list <- map(ppp_pats, function(pat){
+  map(split(pat), function(ppp_mark, divisor = divisor_h) {
+    if(npoints(ppp_mark) < 5)
+      return(NULL)
+    pcf(ppp_mark, 
+        correction = "best", 
+        kernel = "rectangular",
+        divisor = divisor, # it can be a chr or a fun that return the right chr value
+        zerocor = "JonesFoster",
+        bw = bw.diggle)
+  })
+})
+```
+
+### Plots
+
+```{r}
+pcf_plots <- pcf_plot(pcf_list)
+walk(pcf_plots, print)
+```
+
+
+# FDA estimates
+
+```{r}
+Lfun_list <- map(ppp_pats, \(pat){
+  Lest_smooth(pat, centrata = F)
+})
+```
 

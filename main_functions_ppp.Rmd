@@ -1,0 +1,187 @@
+---
+title: "main_functions_ppp"
+author: "Valerio Reffo"
+date: "2026-01-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(spatstat)
+library(purrr)
+library(fda)
+```
+
+# Reading 
+
+Function to create ppp object to use in spatstat functions
+```{r}
+ppp_creation <- function(data, marks_name) {
+  # Define Window
+  wnd_px <- owin(c(min(data$x_px), max(data$x_px)), 
+                 c(min(data$y_px), max(data$y_px)))
+  
+  # Create ppp object
+  my_ppp <- ppp(x = data$x_px, 
+                y = data$y_px, 
+                window = wnd_px, 
+                marks = factor(marks_name)) # factors are usually better for marks
+  
+  unitname(my_ppp) <- c("pixel","pixels")
+  
+  # Handle duplicates (optional, removes points at exact same location)
+  my_ppp <- unique.ppp(my_ppp)
+  
+  return(my_ppp)
+}
+```
+
+# Hybrid estimator for the pcf function
+
+We need a function that return "a" if the ppp_obj is homogeneus and "d" if is inhomogeneus
+based on the Clark-Evans one-sided test with : H0 ppp has CSR
+                                               H1 ppp is regular 
+as recommended by Baddeley
+```{r}
+divisor_h <- function(ppp_obj, alpha = 0.05){
+  p_value <- clarkevans.test(ppp_obj, correction = "Donnelly", alternative = "regular")$p.value
+  if (p_value > alpha)
+    return("a")
+  return("d")
+}
+```
+
+# FDA estimates
+```{r}
+Lest_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F)
+{
+  if(centrata == F){
+    Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
+    mat_Lfun <- sapply(Lfun, function(x) x$iso)
+    r <- Lfun[[1]]$r
+    K <- length(r) + M - 2
+    genbasis <- create.bspline.basis(range(r), K, M, r)
+    genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+    genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+    Lfun.fd <- genfdSmooth$fd
+    fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+    fdnames <- list(fdn_dist,
+                    "Gene" = levels(ppp_obj$marks),
+                    "Funzione L")
+    Lfun.fd$fdnames <- fdnames
+  } else {
+    Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
+    r <- Lfun[[1]]$r
+    # centriamo Lfun
+    mat_Lfun <- sapply(Lfun, function(x) x$iso) |> 
+      sweep(MARGIN = 1, STATS = r, FUN = "-")
+    K <- length(r) + M - 2
+    genbasis <- create.bspline.basis(range(r), K, M, r)
+    genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+    genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+    Lfun.fd <- genfdSmooth$fd
+    fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+    fdnames <- list(fdn_dist,
+                    "Gene" = levels(ppp_obj$marks),
+                    "Funzione L")
+    Lfun.fd$fdnames <- fdnames
+  }
+  return(list(fd = Lfun.fd, fdPar = genfdPar, 
+                basis = genbasis, mat = mat_Lfun, r = r))
+}
+```
+
+
+# PLOTS
+
+## Lest plot
+
+Function to modify and plot the data directly
+```{r}
+Lest_plot <- function(Lest_estimate){
+  plot_data <- imap_dfr(Lest_estimate, function(regions_list, patient_id) {
+    imap_dfr(regions_list, function(fv_data, region_name) {
+      
+      # Extract data and calculate L(r) - r
+      as.data.frame(fv_data) |>
+        select(r, iso) |>
+        mutate(
+          PatientID = as.character(patient_id),
+          Region = region_name,
+          # The specific transformation you requested:
+          L_centered = iso - r 
+        )
+    })
+  })
+
+  # Create a list of plots
+  patient_plots <- plot_data |>
+    group_by(PatientID) |>
+    group_map(function(data, keys) {
+      
+      ggplot(data, aes(x = r, y = L_centered, color = Region)) +
+        # Add reference line at 0 (Theoretical Random distribution)
+        geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+        # Plot the curves
+        geom_line(linewidth = 0.8, na.rm = TRUE) + 
+        scale_color_brewer(palette = "Set1") +
+        theme_bw() +
+        labs(
+          title = paste("Patient:", keys$PatientID),
+          subtitle = "Centered L-function",
+          y = "L(r) - r",
+          x = "Radius (r)",
+          color = "Cell Type"
+        )
+    }, .keep = TRUE) # .keep=TRUE ensures grouping variable is retained if needed
+  return(patient_plots)
+}
+```
+
+
+## pcf plot
+
+```{r}
+pcf_plot <- function(pcf_estimate){
+  plot_data <- imap_dfr(pcf_estimate, function(regions_list, patient_id) {
+    imap_dfr(regions_list, function(fv_data, region_name) {
+      if (is.null(fv_data) || is.character(fv_data) || !inherits(fv_data, "fv")) {
+        return(NULL)
+      }
+      df <- as.data.frame(fv_data)
+      df |>
+        select(r, iso) |>
+        mutate(
+          PatientID = as.character(patient_id),
+          Region = region_name,
+          pcf = iso
+        )
+    })
+  })
+  # Create a list of plots
+  patient_plots <- plot_data |>
+    group_by(PatientID) |>
+    group_map(function(data, keys) {
+      ggplot(data, aes(x = r, y = pcf, color = Region)) +
+        geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 0.5) +
+        geom_line(linewidth = 0.8, na.rm = TRUE) + 
+        scale_color_brewer(palette = "Set1") +
+        theme_bw() +
+        labs(
+          title = paste("Patient:", keys$PatientID),
+          subtitle = "Pair Correlation Function",
+          y = "g(r)",
+          x = "Radius (r)",
+          color = "Cell Type"
+        )
+    }, .keep = TRUE)
+  
+  return(patient_plots)
+}
+```
