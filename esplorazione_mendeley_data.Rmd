@@ -16,6 +16,7 @@ library(dplyr)
 library(spatstat)
 library(tidyverse)
 library(purrr)
+library(fda)
 ```
 
 
@@ -183,7 +184,7 @@ Verify if divisor_fun works as intended
 sapply(ppp_pats, divisor_h)
 ```
 
-Hybrid estimator of the pcf. If the H0 of CSR in the clark evans test is rejected we use the new pcf estimator made by Baddeley ("a"), otherwise we use the standard corrected near zero.
+Hybrid estimator of the pcf. If the H0 of CSR in the clark evans test is rejected we use the new pcf estimator made by Baddeley ("a"), otherwise we use the standard estimator corrected near zero.
 
 ```{r}
 pcf_list <- map(ppp_pats, function(pat){
@@ -215,4 +216,70 @@ Lfun_list <- map(ppp_pats, \(pat){
   Lest_smooth(pat, centrata = F)
 })
 ```
+
+```{r}
+map(Lfun_list, \(Lfun_obj) {
+  plot(Lfun_obj$fd)
+  lines(c(0,350), c(0,350), col = "gold", lwd = 2)
+})
+```
+
+# fPCA 
+
+```{r}
+fpca_list <- map2(Lfun_list, ppp_pats, \(Lfun_obj, ppp_pat){
+  fpca <- pca.fd(Lfun_obj$fd, nharm = 4, Lfun_obj$fdPar)
+  rownames(fpca$scores) <- colnames(Lfun_obj$mat)
+  fpca
+})
+
+fpcaVarmx_list <- map(fpca_list, \(fpca) {varmx.pca.fd(fpca)})
+
+```
+
+## plots of fPCA Varimax rotation
+
+```{r}
+fpca_list$`1`$harmonics
+
+map(fpcaVarmx_list, \(fpcaVarmx){plot.pca.fd(fpcaVarmx, cex.main=0.9)})
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gearchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 5)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 5)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

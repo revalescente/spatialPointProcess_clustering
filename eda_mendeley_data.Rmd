@@ -1,0 +1,197 @@
+---
+title: "eda_mendeley_data"
+author: "Valerio Reffo"
+date: "2026-01-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(purrr)
+library(spatstat)
+library(fda)
+library(forcats)
+```
+
+```{r}
+ppp_pats <- readRDS("dataset/ppp_patients_data.rds")
+```
+
+patients info
+```{r}
+pat_data <- read_excel("dataset/CRC_TMAs_patient_annotations.xlsx", n_max = 35)
+pat_data <- pat_data |>  mutate(Patient = as.character(Patient))
+```
+
+
+Subsetting only the 2 marks of interest, Tumor and Immune cells
+
+
+```{r}
+ppp_pats <- map(ppp_pats, \(pat) {subset(pat, marks %in% c("Tumor", "Immune-infiltrated stroma"), drop = TRUE)})
+ppp_pats
+```
+
+```{r}
+head(dati)
+```
+
+# Plots of the point processes
+
+Let's create the df for the plots with annotations about patients 
+```{r}
+ppp_df <- imap_dfr(ppp_pats, function(ppp, name) {
+  # Defensive: skip empty ppp objects
+  if (ppp$n == 0) return(NULL)
+  data.frame(
+    x = ppp$x,
+    y = ppp$y,
+    mark = marks(ppp),
+    patient = name
+  )
+}) 
+ppp_df <- left_join(ppp_df, pat_data, by = c("patient" = "Patient"))
+```
+
+
+
+```{r}
+ggplot(ppp_df, aes(x = x, y = y, color = mark)) +
+  geom_point(size = 0.4, alpha = 0.7) +
+  facet_wrap(~ patient) +
+  coord_fixed() +
+  labs(title = "Points from multiple patients", color = "Cell type") +
+  theme_minimal()
+```
+
+Histogram of the 2 marks for each patient
+```{r}
+ggplot(ppp_df, aes(x = mark, fill = mark)) +
+  geom_bar() +
+  facet_wrap(~ patient, scales = "free_y") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    x = "Cell type (mark)",
+    y = "Count",
+    title = "Histogram of marks per patient"
+  )
+```
+
+Fun for plotting different categorical variables
+```{r}
+fsplit_plot <- function(data, factor) {
+  factor_quo <- enquo(factor)
+  split_list <- data |> group_split(!!factor_quo)
+  group_label <- as_label(factor_quo)
+  
+  walk(split_list, function(single_group) {
+    # Extract the group value for this group (as character)
+    gval <- unique(single_group[[group_label]])[1]
+    plt <- ggplot(single_group, aes(x = x, y = y, color = mark)) +
+      geom_point(size = 0.7, alpha = 0.7) +
+      facet_wrap(~ patient) +
+      coord_fixed() +
+      labs(title = paste("Points from patients -", group_label, "=", gval),
+           color = "Cell type") +
+      theme_minimal()
+    print(plt)
+  })
+}
+```
+
+
+
+Split by "Group":
+                  Group == 1 : Crohn's like reaction (CLR)
+                  Group == 2 : diffuse inflammatory infiltration (DII)
+
+```{r}
+fsplit_plot(ppp_df, Group)
+```
+
+Sex
+```{r}
+fsplit_plot(ppp_df, Sex)
+```
+
+Full histology
+
+```{r}
+fsplit_plot(ppp_df, Full_Histology)
+```
+
+Full_Tumor_Location
+
+```{r}
+fsplit_plot(ppp_df, Full_Tumor_Location)
+```
+
+```{r}
+Lfun_list <- Lcross_smooth(ppp_pats, centrata = T)
+```
+
+Plot of the Lcross smoothed function colored by different patients' characteristics
+```{r}
+plot_fd_gg_meta <- function(fdobj, meta_df, 
+                            id_col = "Patient", # curve name = Patient
+                            color_by = NULL,    # (e.g., "Group")
+                            facet_by = NULL,    # (optional)
+                            grid_length = 200) {
+  # Range & grid
+  rg <- fdobj$basis$rangeval
+  rgrid <- seq(rg[1], rg[2], length.out = grid_length)
+  
+  # Eval on grid
+  yvals <- eval.fd(rgrid, fdobj)
+  curve_names <- fdobj$fdnames[[2]]
+  
+  # Data wrangle
+  df <- as_tibble(yvals)
+  names(df) <- curve_names
+  df$r <- rgrid
+  tidy_df <- pivot_longer(df, -r, names_to = id_col, values_to = "value")
+  tidy_df <- left_join(tidy_df, meta_df, by = setNames(id_col, id_col))
+  
+  # Plot
+  plt <- ggplot(tidy_df, aes(x = r, y = value, group = .data[[id_col]])) +
+    geom_line(aes(color = as.factor(.data[[color_by]])),
+              linewidth = 0.7) +
+    labs(x = "Distance", y = "Function value", title = "Lcross Function") +
+    theme_minimal()
+  
+  if (!is.null(facet_by)) {
+    plt <- plt + facet_wrap(vars(!!sym(facet_by)))
+  }
+  
+  return(plt)
+}
+```
+
+```{r}
+var_colors <- c("Group", "Sex", "Full_Tumor_Location", "Full_Histology")
+
+walk(var_colors, \(color) {
+  p <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",       # Curve names must match "Patient"
+    color_by = color,         # Use "Group" from meta for color
+    facet_by = NULL,           # (optional) facet by Sex
+    grid_length = 50
+  )
+  print(p)
+})
+
+```
+

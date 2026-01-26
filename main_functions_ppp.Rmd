@@ -37,7 +37,8 @@ ppp_creation <- function(data, marks_name) {
   
   # Handle duplicates (optional, removes points at exact same location)
   my_ppp <- unique.ppp(my_ppp)
-  
+  # Remove NA
+  my_ppp <- my_ppp[!is.na(marks(my_ppp))]
   return(my_ppp)
 }
 ```
@@ -61,42 +62,161 @@ divisor_h <- function(ppp_obj, alpha = 0.05){
 ```{r}
 Lest_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F)
 {
-  if(centrata == F){
-    Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
-    mat_Lfun <- sapply(Lfun, function(x) x$iso)
-    r <- Lfun[[1]]$r
-    K <- length(r) + M - 2
-    genbasis <- create.bspline.basis(range(r), K, M, r)
-    genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
-    genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
-    Lfun.fd <- genfdSmooth$fd
-    fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
-    fdnames <- list(fdn_dist,
-                    "Gene" = levels(ppp_obj$marks),
-                    "Funzione L")
-    Lfun.fd$fdnames <- fdnames
-  } else {
-    Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
-    r <- Lfun[[1]]$r
-    # centriamo Lfun
-    mat_Lfun <- sapply(Lfun, function(x) x$iso) |> 
-      sweep(MARGIN = 1, STATS = r, FUN = "-")
-    K <- length(r) + M - 2
-    genbasis <- create.bspline.basis(range(r), K, M, r)
-    genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
-    genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
-    Lfun.fd <- genfdSmooth$fd
-    fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
-    fdnames <- list(fdn_dist,
-                    "Gene" = levels(ppp_obj$marks),
-                    "Funzione L")
-    Lfun.fd$fdnames <- fdnames
+  # 1. Calculate raw L-functions (Common for both)
+  Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
+  r <- Lfun[[1]]$r
+  mat_Lfun <- sapply(Lfun, function(x) x$iso)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_Lfun <- sweep(mat_Lfun, MARGIN = 1, STATS = r, FUN = "-")
   }
+  
+  # --- FIX: Remove columns with NAs/Inf (Applied to BOTH cases) ---
+  bad_columns <- apply(mat_Lfun, 2, function(x) any(is.na(x) | is.infinite(x)))
+  
+  if(any(bad_columns)){
+    n_removed <- sum(bad_columns)
+    warning(paste("Removed", n_removed, "functions containing NAs/Inf before smoothing."))
+    # Subset matrix to keep only good columns
+    mat_Lfun <- mat_Lfun[, !bad_columns]
+  }
+  # ----------------------------------------------------------------
+  
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+  Lfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_Lfun), # Crucial: use names of surviving columns
+                  "Funzione L")
+  Lfun.fd$fdnames <- fdnames
+  
   return(list(fd = Lfun.fd, fdPar = genfdPar, 
-                basis = genbasis, mat = mat_Lfun, r = r))
+              basis = genbasis, mat = mat_Lfun, r = r))
+}
+
+
+# OLD VERSION
+
+# Lest_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F)
+# {
+#   if(centrata == F){
+#     Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
+#     mat_Lfun <- sapply(Lfun, function(x) x$iso)
+#     r <- Lfun[[1]]$r
+#     K <- length(r) + M - 2
+#     genbasis <- create.bspline.basis(range(r), K, M, r)
+#     genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+#     genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+#     Lfun.fd <- genfdSmooth$fd
+#     fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+#     fdnames <- list(fdn_dist,
+#                     "Gene" = levels(ppp_obj$marks),
+#                     "Funzione L")
+#     Lfun.fd$fdnames <- fdnames
+#   } else {
+#     Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
+#     r <- Lfun[[1]]$r
+#     # centriamo Lfun
+#     mat_Lfun <- sapply(Lfun, function(x) x$iso) |> 
+#       sweep(MARGIN = 1, STATS = r, FUN = "-")
+#     K <- length(r) + M - 2
+#     genbasis <- create.bspline.basis(range(r), K, M, r)
+#     genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+#     genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+#     Lfun.fd <- genfdSmooth$fd
+#     fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+#     fdnames <- list(fdn_dist,
+#                     "Gene" = levels(ppp_obj$marks),
+#                     "Funzione L")
+#     Lfun.fd$fdnames <- fdnames
+#   }
+#   return(list(fd = Lfun.fd, fdPar = genfdPar, 
+#                 basis = genbasis, mat = mat_Lfun, r = r))
+# }
+```
+
+```{r}
+Lcross_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F)
+{
+  
+  Lcross_list <- map(ppp_obj, function(pat){
+    Lcross(pat, "Tumor", "Immune-infiltrated stroma", correction = "best")
+  })
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- Lcross_list[[1]]$r
+  mat_Lfun <- sapply(Lcross_list, function(x) x$iso)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_Lfun <- sweep(mat_Lfun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+  Lfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_Lfun), # Crucial: use names of surviving columns
+                  "Funzione L")
+  Lfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Lfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_Lfun, r = r))
 }
 ```
 
+# generic function for smoothing funs
+```{r}
+funcross_smooth <- function(ppp_obj, fun, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+  
+  funcross_list <- map(ppp_obj, function(pat){
+    fun(pat, "Tumor", "Immune-infiltrated stroma", correction = "best", ...)
+  })
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- funcross_list[[1]]$r
+  mat_fun <- sapply(funcross_list, function(x) x$iso)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_fun), # Crucial: use names of surviving columns
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+```
 
 # PLOTS
 
