@@ -37,11 +37,6 @@ Subsetting only the 2 marks of interest, Tumor and Immune cells
 
 ```{r}
 ppp_pats <- map(ppp_pats, \(pat) {subset(pat, marks %in% c("Tumor", "Immune-infiltrated stroma"), drop = TRUE)})
-ppp_pats
-```
-
-```{r}
-head(dati)
 ```
 
 # Plots of the point processes
@@ -88,6 +83,72 @@ ggplot(ppp_df, aes(x = mark, fill = mark)) +
   )
 ```
 
+Explore the effect of single covariates, let's compare the number of points in the point processes for each variable
+
+Let's work with the hyperframe so it's easier (?) to manage the variables
+```{r}
+pats_names <- sapply(names(ppp_pats), \(name) {paste0("Patient",name)}, simplify = T)
+names(ppp_pats) <- pats_names
+pats_hf <- as.solist(ppp_pats)
+(pats_hf <- as.hyperframe(ppp = pats_hf, row.names = names(ppp_pats)))
+pats_hf$n <- with(pats_hf, npoints(ppp))
+pats_hf$patients <- names(ppp_pats)
+pats_hf$area <- with(pats_hf, area.owin(ppp$window))
+pats_hf <- cbind(pats_hf, pat_data[!(rownames(pat_data) %in% c(9,19) ),colnames(pat_data) %in% c("Group", "Sex", "Age", "Full_Histology", "Full_Tumor_Location",  "Simple_Tumor_Location")])
+```
+
+
+```{r}
+var_colors <- c("Group", "Sex", "Full_Tumor_Location", "Full_Histology")
+
+map(var_colors, \(color){
+  form <- as.formula(paste("sqrt(n) ~", color))
+  boxplot(form, data = pats_hf)
+  v <- pretty(pats_hf$n); axis(4, at=sqrt(v), labels=v)
+  title(paste0(color, " variable"))
+})
+```
+
+With mean intensity
+```{r}
+aggregate(n/area ~ Group, data = pats_hf, FUN = mean)
+
+map(var_colors, \(color){
+  form <- as.formula(paste("n/area ~", color))
+  aggregate(form, data = pats_hf, FUN = \(x) {mean(x)*1000})
+})
+```
+IF we have windows of different area we better weight the average
+
+Group
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Group), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Group), sum)
+ntot/atot*1000
+```
+
+Sex
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Sex), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Sex), sum)
+ntot/atot*1000
+```
+
+Full Tumor Location
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Full_Tumor_Location), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Full_Tumor_Location), sum)
+ntot/atot*1000
+```
+
+Full Histology
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Full_Histology), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Full_Histology), sum)
+ntot/atot*1000
+```
+
+
 Fun for plotting different categorical variables
 ```{r}
 fsplit_plot <- function(data, factor) {
@@ -110,7 +171,7 @@ fsplit_plot <- function(data, factor) {
 }
 ```
 
-
+## split by categories
 
 Split by "Group":
                   Group == 1 : Crohn's like reaction (CLR)
@@ -138,60 +199,152 @@ fsplit_plot(ppp_df, Full_Tumor_Location)
 ```
 
 ```{r}
-Lfun_list <- Lcross_smooth(ppp_pats, centrata = T)
+Lfun_list <- Lcross_smooth(ppp_pats, centrata = T, rmax = 150)
 ```
 
 Plot of the Lcross smoothed function colored by different patients' characteristics
-```{r}
-plot_fd_gg_meta <- function(fdobj, meta_df, 
-                            id_col = "Patient", # curve name = Patient
-                            color_by = NULL,    # (e.g., "Group")
-                            facet_by = NULL,    # (optional)
-                            grid_length = 200) {
-  # Range & grid
-  rg <- fdobj$basis$rangeval
-  rgrid <- seq(rg[1], rg[2], length.out = grid_length)
-  
-  # Eval on grid
-  yvals <- eval.fd(rgrid, fdobj)
-  curve_names <- fdobj$fdnames[[2]]
-  
-  # Data wrangle
-  df <- as_tibble(yvals)
-  names(df) <- curve_names
-  df$r <- rgrid
-  tidy_df <- pivot_longer(df, -r, names_to = id_col, values_to = "value")
-  tidy_df <- left_join(tidy_df, meta_df, by = setNames(id_col, id_col))
-  
-  # Plot
-  plt <- ggplot(tidy_df, aes(x = r, y = value, group = .data[[id_col]])) +
-    geom_line(aes(color = as.factor(.data[[color_by]])),
-              linewidth = 0.7) +
-    labs(x = "Distance", y = "Function value", title = "Lcross Function") +
-    theme_minimal()
-  
-  if (!is.null(facet_by)) {
-    plt <- plt + facet_wrap(vars(!!sym(facet_by)))
-  }
-  
-  return(plt)
-}
-```
 
 ```{r}
 var_colors <- c("Group", "Sex", "Full_Tumor_Location", "Full_Histology")
 
 walk(var_colors, \(color) {
-  p <- plot_fd_gg_meta(
+  plt <- plot_fd_gg_meta(
     fdobj    = Lfun_list$fd,
     meta_df  = pat_data,
-    id_col   = "Patient",       # Curve names must match "Patient"
-    color_by = color,         # Use "Group" from meta for color
-    facet_by = NULL,           # (optional) facet by Sex
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = NULL,
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
     grid_length = 50
   )
-  print(p)
+  print(plt)
 })
 
+```
+
+Facet by Sex
+```{r}
+var_colors <- c("Group", "Full_Tumor_Location", "Full_Histology")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Sex",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+Facet by Group
+```{r}
+var_colors <- c("Sex", "Full_Tumor_Location", "Full_Histology")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Group",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+Facet by Full_Histology
+```{r}
+var_colors <- c("Group", "Sex", "Full_Tumor_Location")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Full_Histology",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+Facet by Full_Tumor_Location
+```{r}
+var_colors <- c("Group", "Sex", "Full_Histology")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Full_Tumor_Location",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+
+# spatial plot group by Lcross behaviour
+
+Function to plot a subset of the ppp
+```{r}
+multi_patient_plot <- function(data, patients, filter_factor = NULL, factor_name = NULL, pp_type) {
+  # Coerce patient types to character for robust comparison
+  data$patient <- as.character(data$patient)
+  patients <- as.character(patients)
+  plot_df <- data %>% filter(patient %in% patients)
+  
+  # Optionally filter by group/factor
+  if (!is.null(filter_factor) && !is.null(factor_name)) {
+    plot_df <- plot_df %>% filter(.data[[factor_name]] == filter_factor)
+    main_title <- paste0("Patients: ", paste(patients, collapse=", "), 
+                         " (", factor_name, "=", filter_factor, ")")
+  } else {
+    main_title <- paste0("Patients: ", paste(patients, collapse=", "), ". Type: ", pp_type)
+  }
+
+  ggplot(plot_df, aes(x = x, y = y, color = mark)) +
+    geom_point(size = 0.4, alpha = 0.7) +
+    facet_wrap(~ patient) +
+    coord_fixed() +
+    labs(title = main_title, color = "Cell type") +
+    theme_minimal()
+}
+```
+
+Patients in which the 2 cell type show the strongest association then in the other patients
+```{r}
+clust_plot <- multi_patient_plot(ppp_df, patients = c(29, 11, 6), pp_type = "Positive association")
+```
+
+Patients which show negative association between the 2 cell types
+
+```{r}
+reg_plot <- multi_patient_plot(ppp_df, patients = c(14, 13, 5), pp_type = "Negative association")
+```
+
+At last the patients showing indipendence between the cell types
+```{r}
+csr_plot <- multi_patient_plot(ppp_df, patients = c(2, 23, 16), pp_type = "Indipendence")
+```
+
+```{r}
+clust_plot/csr_plot/reg_plot
 ```
 

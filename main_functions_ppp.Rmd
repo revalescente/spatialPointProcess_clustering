@@ -24,8 +24,8 @@ Function to create ppp object to use in spatstat functions
 ```{r}
 ppp_creation <- function(data, marks_name) {
   # Define Window
-  wnd_px <- owin(c(min(data$x_px), max(data$x_px)), 
-                 c(min(data$y_px), max(data$y_px)))
+  wnd_px <- owin(c(base::min(data$x_px)-1, base::max(data$x_px)+1), 
+                 c(base::min(data$y_px)-1, base::max(data$y_px)+1))
   
   # Create ppp object
   my_ppp <- ppp(x = data$x_px, 
@@ -144,11 +144,11 @@ Lest_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = 
 ```
 
 ```{r}
-Lcross_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F)
+Lcross_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F, ...)
 {
   
   Lcross_list <- map(ppp_obj, function(pat){
-    Lcross(pat, "Tumor", "Immune-infiltrated stroma", correction = "best")
+    Lcross(pat, "Tumor", "Immune-infiltrated stroma", correction = "best", rmax = rmax, ...)
   })
 
   # 1. Calculate raw L-functions (Common for both)
@@ -215,6 +215,18 @@ funcross_smooth <- function(ppp_obj, fun, rmax = NULL, M = 6, genLfun.fd = 4, ce
   
   return(list(fd = Genfun.fd, fdPar = genfdPar, 
               basis = genbasis, mat = mat_fun, r = r))
+}
+```
+
+## rMax estimate
+
+```{r}
+rMax_heuristic <- function(ppp){
+  radius_df <- lapply(ppp, function(pat){
+    return(data.frame("bounding_radius" = spatstat.geom::boundingradius(pat)))
+  }) |> dplyr::bind_rows()
+  rMax <- min(radius_df[["bounding_radius"]]) / 3
+  rMax
 }
 ```
 
@@ -305,3 +317,79 @@ pcf_plot <- function(pcf_estimate){
   return(patient_plots)
 }
 ```
+
+Plot of the Lcross smoothed function colored by different patients' characteristics
+```{r}
+plot_fd_gg_meta <- function(fdobj, meta_df, 
+                            id_col = "Patient", 
+                            color_by = NULL,
+                            facet_by = NULL,
+                            grid_length = 400,
+                            label_curves = TRUE,              # New argument: show labels
+                            label_var = NULL,                 # Which variable to show as label (defaults to id_col)
+                            label_nudge_x = 0.0,              # Move label right if desired
+                            label_size = 2.5) {
+  # Range & grid
+  rg <- fdobj$basis$rangeval
+  rgrid <- seq(rg[1], rg[2], length.out = grid_length)
+  
+  # Eval on grid
+  yvals <- eval.fd(rgrid, fdobj)
+  curve_names <- fdobj$fdnames[[2]]
+  
+  # Data wrangle
+  df <- as_tibble(yvals)
+  names(df) <- curve_names
+  df$r <- rgrid
+  tidy_df <- pivot_longer(df, -r, names_to = id_col, values_to = "value")
+  tidy_df <- left_join(tidy_df, meta_df, by = setNames(id_col, id_col))
+
+  # For labeling: rightmost (max r) point for each curve
+  if (is.null(label_var)) label_var <- id_col
+  label_df <- tidy_df %>%
+    group_by(at = .data[[id_col]]) %>%
+    filter(r == max(r)) %>%
+    ungroup()
+
+  # Plot
+  plt <- ggplot(tidy_df, aes(x = r, y = value, group = .data[[id_col]])) +
+    geom_line(
+      aes(
+        color = if (!is.null(color_by)) .data[[color_by]] else NULL
+      ),
+      linewidth = 0.7
+    ) +
+    labs(
+      x = "Distance",
+      y = "Function value",
+      title = "Lcross Function",
+      color = color_by
+    ) +
+    theme_minimal() +
+    scale_x_continuous(limits = rg)
+
+  if (!is.null(facet_by)) {
+    plt <- plt + facet_wrap(vars(!!sym(facet_by)))
+  }
+
+  # Add curve labels at the end, if requested
+  if (label_curves) {
+    plt <- plt +
+      geom_text(
+        data = label_df,
+        aes(
+          x = r + label_nudge_x,
+          y = value,
+          label = .data[[label_var]],
+          color = if (!is.null(color_by)) .data[[color_by]] else NULL
+        ),
+        hjust = 0, # left align
+        size = label_size,
+        show.legend = FALSE,
+        check_overlap = TRUE
+      )
+  }
+  return(plt)
+}
+```
+

@@ -30,20 +30,11 @@ dati <- readRDS("dataset/patients_region1.rds")
 patients_list <- split(dati, dati$patients)
 ```
 
-3. Apply the function to each patient
-
+full dataset ppp
 ```{r}
-ppp_pats_old <- map(patients_list, function(pat) {
-  # Note: Ensure 'cell_type' column exists in your data. 
-  # If it is named 'ClusterID' or something else, update it here.
-  celltypes <- as.factor(pat$cell_type)
-  ppp_creation(pat, celltypes)
-})
-
-# Check the result
-# ppp_pats is now a list of ppp objects, named by patient ID
-print(names(ppp_pats))
+ppp_pats <- readRDS("dataset/ppp_obj_clean_data.rds")
 ```
+
 
 # Analisi Esplorativa
 
@@ -110,9 +101,7 @@ ppp_pats <- map(patients_list, function(pat) {
 })
 ```
 
-```{r}
-saveRDS(ppp_pats, file = "dataset/ppp_patients_data.RDS")
-```
+
 
 
 Controlliamo di nuovo come sono le numerosita dei 2 tipi cellulari interessati
@@ -189,12 +178,17 @@ walk(Lcross_loh, \(x) {plot(x, .-r~r)})
 
 ```{r}
 Lcross_env <- map(ppp_pats, \(pat){ 
-  envelope(pat, Lcross, nsim=100, rank=1, global=TRUE, i = "Tumor", j = "Immune-infiltrated stroma", correction = "best")
+  envelope(pat, Lcross, nsim=100, rank=1, global=TRUE, 
+           i = "Tumor", j = "Immune-infiltrated stroma", 
+           correction = "best", rmax = 150)
 })
 ```
 
 ```{r}
-walk(Lcross_env, \(x) {plot(x, .-r~r)})
+iwalk(Lcross_env, \(x, name) {
+    plot(x, .-r~r, legend = F)
+    title(paste0("processo di punto del paziente ", name))
+  })
 ```
 
 
@@ -399,7 +393,7 @@ Gcross_list <- funcross_smooth(ppp_pats, fun = Gcross)
 ```
 
 ```{r}
-Gcross_list <- map(ppp_pats, \(pat){Gest(pat, correction = "best", rmax = 30)})
-map(Gcross_list, plot)
+Gcross_list <- map(ppp_pats, \(pat){Gest(pat, correction = "best", rmax = 100)})
+walk(Gcross_list, plot)
 ```
 
