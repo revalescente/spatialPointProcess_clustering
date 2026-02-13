@@ -1,0 +1,420 @@
+---
+title: "main_functions_ppp"
+author: "Valerio Reffo"
+date: "2026-01-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(spatstat)
+library(purrr)
+library(fda)
+```
+
+# Reading 
+
+Function to create ppp object to use in spatstat functions
+```{r}
+ppp_creation <- function(data, marks_name, x_coord_name, y_coord_name) {
+  
+  # Check if coordinate names are characters
+  if (!is.character(x_coord_name) || !is.character(y_coord_name)) {
+    stop("x_coord_name and y_coord_name must be character strings.")
+  }
+  
+  # Define Window
+  wnd_px <- owin(range(data[[x_coord_name]], na.rm = TRUE), 
+                 range(data[[y_coord_name]], na.rm = TRUE))
+  
+  # Prepare Marks
+  # If one column name is provided, we create a factor vector
+  # If multiple are provided, we create a data frame where each column is a factor
+  if (length(marks_name) == 1) {
+    m <- as.factor(data[[marks_name]])
+  } else {
+    # lapply applies as.factor to each column, then we turn it back into a data frame
+    m <- as.data.frame(lapply(data[marks_name], as.factor))
+    colnames(m) <- marks_name # ensure names are preserved
+  }
+  
+  # Create ppp object
+  my_ppp <- ppp(x = data[[x_coord_name]], 
+                y = data[[y_coord_name]], 
+                window = wnd_px, 
+                marks = m) 
+  
+  unitname(my_ppp) <- c("pixel","pixels")
+  
+  # Handle duplicates
+  my_ppp <- unique.ppp(my_ppp)
+  
+  # Remove rows with NA in marks
+  # complete.cases() works for both vectors and data frames
+  m_values <- marks(my_ppp)
+  my_ppp <- my_ppp[complete.cases(m_values)]
+  
+  return(my_ppp)
+}
+```
+
+# Hybrid estimator for the pcf function
+
+We need a function that return "a" if the ppp_obj is homogeneus and "d" if is inhomogeneus
+based on the Clark-Evans one-sided test with : H0 ppp has CSR
+                                               H1 ppp is regular 
+as recommended by Baddeley
+```{r}
+divisor_h <- function(ppp_obj, alpha = 0.05){
+  p_value <- clarkevans.test(ppp_obj, correction = "Donnelly", alternative = "regular")$p.value
+  if (p_value > alpha)
+    return("a")
+  return("d")
+}
+```
+
+# FDA estimates
+```{r}
+Lest_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F)
+{
+  # 1. Calculate raw L-functions (Common for both)
+  Lfun <- lapply(split(ppp_obj), Lest, correction = "best", rmax = rmax)
+  r <- Lfun[[1]]$r
+  mat_Lfun <- sapply(Lfun, function(x) x$iso)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_Lfun <- sweep(mat_Lfun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+  
+  # --- FIX: Remove columns with NAs/Inf (Applied to BOTH cases) ---
+  bad_columns <- apply(mat_Lfun, 2, function(x) any(is.na(x) | is.infinite(x)))
+  
+  if(any(bad_columns)){
+    n_removed <- sum(bad_columns)
+    warning(paste("Removed", n_removed, "functions containing NAs/Inf before smoothing."))
+    # Subset matrix to keep only good columns
+    mat_Lfun <- mat_Lfun[, !bad_columns]
+  }
+  # ----------------------------------------------------------------
+  
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+  Lfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_Lfun), # Crucial: use names of surviving columns
+                  "Funzione L")
+  Lfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Lfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_Lfun, r = r))
+}
+```
+
+```{r}
+Lcross_smooth <- function(ppp_obj, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+  
+  Lcross_list <- map(ppp_obj, function(pat){
+    Lcross(pat, "Tumor", "Immune-infiltrated stroma", correction = "best", rmax = rmax, ...)
+  })
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- Lcross_list[[1]]$r
+  mat_Lfun <- sapply(Lcross_list, function(x) x$iso)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_Lfun <- sweep(mat_Lfun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_Lfun, genfdPar)
+  Lfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_Lfun), # Crucial: use names of surviving columns
+                  "Funzione L")
+  Lfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Lfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_Lfun, r = r))
+}
+```
+
+# generic function for smoothing funs
+```{r}
+funcross_smooth <- function(ppp_obj, fun, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+  
+  funcross_list <- map(ppp_obj, function(pat){
+    fun(pat, "Tumor", "Immune-infiltrated stroma", correction = "best", ...)
+  })
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- funcross_list[[1]]$r
+  mat_fun <- sapply(funcross_list, function(x) x$iso)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_fun), # Crucial: use names of surviving columns
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+```
+
+## rMax estimate
+
+```{r}
+rMax_heuristic <- function(ppp){
+  radius_df <- lapply(ppp, function(pat){
+    return(data.frame("bounding_radius" = spatstat.geom::boundingradius(pat)))
+  }) |> dplyr::bind_rows()
+  rMax <- min(radius_df[["bounding_radius"]]) / 3
+  rMax
+}
+```
+
+## Inhom Function estimate
+```{r}
+funcross_inhom_smooth <- function(ppp_obj, fun, rmax = NULL, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+  funcross_list <- map(ppp_obj, function(pat){
+    # sigma estimate for each mark
+    bw_list <- map(split.ppp(pat), \(singlem){bw.diggle(singlem)})
+    # intensity estimate for each mark
+    lambdaT <- density.ppp(split.ppp(pat)$Tumor, sigma=bw_list$Tumor, at="points")
+    lambdaS <- density.ppp(split.ppp(pat)$`Immune-infiltrated stroma`, sigma=bw_list$`Immune-infiltrated stroma`, at="points")
+    
+    fun(pat, "Tumor", "Immune-infiltrated stroma", lambdaT, lambdaS, correction = "best", ...)
+  })
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- funcross_list[[1]]$r
+  mat_fun <- sapply(funcross_list, function(x) x$iso)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", rmax, "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_fun), # Crucial: use names of surviving columns
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+```
+
+
+# PLOTS
+
+## Lest plot
+
+Function to modify and plot the data directly
+```{r}
+Lest_plot <- function(Lest_estimate){
+  plot_data <- imap_dfr(Lest_estimate, function(regions_list, patient_id) {
+    imap_dfr(regions_list, function(fv_data, region_name) {
+      
+      # Extract data and calculate L(r) - r
+      as.data.frame(fv_data) |>
+        select(r, iso) |>
+        mutate(
+          PatientID = as.character(patient_id),
+          Region = region_name,
+          # The specific transformation you requested:
+          L_centered = iso - r 
+        )
+    })
+  })
+
+  # Create a list of plots
+  patient_plots <- plot_data |>
+    group_by(PatientID) |>
+    group_map(function(data, keys) {
+      
+      ggplot(data, aes(x = r, y = L_centered, color = Region)) +
+        # Add reference line at 0 (Theoretical Random distribution)
+        geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+        # Plot the curves
+        geom_line(linewidth = 0.8, na.rm = TRUE) + 
+        scale_color_brewer(palette = "Set1") +
+        theme_bw() +
+        labs(
+          title = paste("Patient:", keys$PatientID),
+          subtitle = "Centered L-function",
+          y = "L(r) - r",
+          x = "Radius (r)",
+          color = "Cell Type"
+        )
+    }, .keep = TRUE) # .keep=TRUE ensures grouping variable is retained if needed
+  return(patient_plots)
+}
+```
+
+
+## pcf plot
+
+```{r}
+pcf_plot <- function(pcf_estimate){
+  plot_data <- imap_dfr(pcf_estimate, function(regions_list, patient_id) {
+    imap_dfr(regions_list, function(fv_data, region_name) {
+      if (is.null(fv_data) || is.character(fv_data) || !inherits(fv_data, "fv")) {
+        return(NULL)
+      }
+      df <- as.data.frame(fv_data)
+      df |>
+        select(r, iso) |>
+        mutate(
+          PatientID = as.character(patient_id),
+          Region = region_name,
+          pcf = iso
+        )
+    })
+  })
+  # Create a list of plots
+  patient_plots <- plot_data |>
+    group_by(PatientID) |>
+    group_map(function(data, keys) {
+      ggplot(data, aes(x = r, y = pcf, color = Region)) +
+        geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 0.5) +
+        geom_line(linewidth = 0.8, na.rm = TRUE) + 
+        scale_color_brewer(palette = "Set1") +
+        theme_bw() +
+        labs(
+          title = paste("Patient:", keys$PatientID),
+          subtitle = "Pair Correlation Function",
+          y = "g(r)",
+          x = "Radius (r)",
+          color = "Cell Type"
+        )
+    }, .keep = TRUE)
+  
+  return(patient_plots)
+}
+```
+
+Plot of the Lcross smoothed function colored by different patients' characteristics
+```{r}
+plot_fd_gg_meta <- function(fdobj, meta_df, 
+                            id_col = "Patient", 
+                            color_by = NULL,
+                            facet_by = NULL,
+                            grid_length = 400,
+                            label_curves = TRUE,              # New argument: show labels
+                            label_var = NULL,                 # Which variable to show as label (defaults to id_col)
+                            label_nudge_x = 0.0,              # Move label right if desired
+                            label_size = 2.5) {
+  # Range & grid
+  rg <- fdobj$basis$rangeval
+  rgrid <- seq(rg[1], rg[2], length.out = grid_length)
+  
+  # Eval on grid
+  yvals <- eval.fd(rgrid, fdobj)
+  curve_names <- fdobj$fdnames[[2]]
+  
+  # Data wrangle
+  df <- as_tibble(yvals)
+  names(df) <- curve_names
+  df$r <- rgrid
+  tidy_df <- pivot_longer(df, -r, names_to = id_col, values_to = "value")
+  tidy_df <- left_join(tidy_df, meta_df, by = setNames(id_col, id_col))
+
+  # For labeling: rightmost (max r) point for each curve
+  if (is.null(label_var)) label_var <- id_col
+  label_df <- tidy_df %>%
+    group_by(at = .data[[id_col]]) %>%
+    filter(r == max(r)) %>%
+    ungroup()
+
+  # Plot
+  plt <- ggplot(tidy_df, aes(x = r, y = value, group = .data[[id_col]])) +
+    geom_line(
+      aes(
+        color = if (!is.null(color_by)) .data[[color_by]] else NULL
+      ),
+      linewidth = 0.7
+    ) +
+    labs(
+      x = "Distance",
+      y = "Function value",
+      title = "Lcross Function",
+      color = color_by
+    ) +
+    theme_minimal() +
+    scale_x_continuous(limits = rg)
+
+  if (!is.null(facet_by)) {
+    plt <- plt + facet_wrap(vars(!!sym(facet_by)))
+  }
+
+  # Add curve labels at the end, if requested
+  if (label_curves) {
+    plt <- plt +
+      geom_text(
+        data = label_df,
+        aes(
+          x = r + label_nudge_x,
+          y = value,
+          label = .data[[label_var]],
+          color = if (!is.null(color_by)) .data[[color_by]] else NULL
+        ),
+        hjust = 0, # left align
+        size = label_size,
+        show.legend = FALSE,
+        check_overlap = TRUE
+      )
+  }
+  return(plt)
+}
+```
+

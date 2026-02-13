@@ -1,0 +1,62 @@
+---
+title: "Ilaria Data - HoverNet segmentation"
+author: "Valerio Reffo"
+date: "2026-02-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+```
+
+```{r}
+data_path <- '/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/h5ad/TCGA-WR-A838-01Z-00-DX1.5FE22DE4-CEFB-45F6-9299-505023A8F3BA.h5ad'
+# prova <- read_h5ad(data_path, as = "SingleCellExperiment") perdiamo obsm (coordinate spaziali) quindi convertiamo manualmente
+```
+
+Function to transform anndata to SpatialExperiment
+
+```{r}
+ann2spe <- \(data_path, spat_coords_name = c("x", "y"), img_path = NULL, ...) {
+  ann <- anndataR::read_h5ad(data_path)
+  #object to build SpatialExperiment
+  counts <- t(ann$X) # transpose it
+  cd <- ann$obs
+  meta <- ann$uns
+  spat <- ann$obsm$spatial
+  colnames(spat) <- spat_coords_name
+  cd <- cbind(cd, spat)
+  spe <- SpatialExperiment::SpatialExperiment(assays = list("counts" = counts), 
+                                              colData = cd,
+                                              metadata = mt,
+                                              spatialCoordsNames = spat_coords_name,
+                                              imageSources = img_path, ...)
+  spe
+}
+```
+
+```{r}
+spe <- ann2spe(data_path, img_path = "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/thumb/TCGA-WR-A838-01Z-00-DX1.5FE22DE4-CEFB-45F6-9299-505023A8F3BA.png")
+spe
+```
+
+```{r}
+plotVisium(spe, spots = FALSE)
+```
+
+```{r}
+plotCoords(spe, annotate = "type", in_tissue = NULL, point_size = 0.1)
+```
+
+```{r}
+plotVisium(spe, spots = FALSE) | 
+  plotCoords(spe, annotate = "type", in_tissue = NULL, point_size = 0.1)
+```
+

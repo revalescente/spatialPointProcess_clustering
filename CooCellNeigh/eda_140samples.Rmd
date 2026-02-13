@@ -1,0 +1,381 @@
+---
+title: "EDA - all 4 samples per patient"
+author: "Valerio Reffo"
+date: "2026-02-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(spatstat)
+library(tidyverse)
+library(purrr)
+library(fda)
+library(readxl)
+library(pals)
+library(knitr)
+library(tidyr)
+```
+
+
+```{r}
+dati = read_csv("dataset/CRC_clusters_neighborhoods_markers.csv")
+```
+
+Reduce the number of clusters
+```{r}
+unique(dati$ClusterName)
+```
+
+"tumor cells"  
+
+"CD4+ T cells CD45RO+"       
+"CD4+ T cells GATA3+"        
+"CD3+ T cells" 
+"CD8+ T cells"               
+"CD4+ T cells"              
+"Tregs"  
+
+"B cells"  
+"plasma cells" 
+
+"CD68+ macrophages"         
+"CD68+ macrophages GzmB+"    
+"CD68+CD163+ macrophages"    
+"CD11b+CD68+ macrophages"    
+"CD163+ macrophages"      
+"CD11c+ DCs"                 
+"CD11b+ monocytes"   
+"granulocytes" 
+
+"adipocytes"   
+"nerves"                     
+"smooth muscle"             
+"stroma"
+"vasculature"
+"lymphatics"  
+
+"dirt"    
+
+"NK cells"                   
+
+"immune cells"   
+
+"tumor cells / immune cells" 
+
+"immune cells / vasculature" 
+
+"undefined"                  
+
+
+```{r}
+dati <- dati |> 
+  mutate(broad_type = case_when(
+    ClusterName %in% c("CD4+ T cells CD45RO+", "CD8+ T cells", "Tregs", 
+                     "CD4+ T cells", "CD4+ T cells GATA3+", "CD3+ T cells") ~ "T cells",
+    
+    ClusterName %in% c("CD68+CD163+ macrophages", "CD11b+CD68+ macrophages", 
+                     "CD68+ macrophages GzmB+", "CD68+ macrophages", 
+                     "CD163+ macrophages", "CD11b+ monocytes", 
+                     "CD11c+ DCs", "granulocytes")                          ~ "Myeloid",
+    
+    ClusterName == "B cells"                                                ~ "B cells",
+    ClusterName == "plasma cells"                                           ~ "plasma cells",
+    ClusterName == "NK cells"                                               ~ "NK cells",
+    ClusterName == "tumor cells"                                            ~ "Tumor",
+    ClusterName %in% c("stroma", "adipocytes", "smooth muscle", "nerves")   ~ "Stroma",
+    ClusterName %in% c("vasculature", "lymphatics")                         ~ "Vasculature",
+    ClusterName == "immune cells"                                           ~ "Immune cells",
+    ClusterName == "tumor cells / immune cells"                             ~ "Tumor/immune",
+    ClusterName == "immune cells / vasculature"                             ~ "Immune/vascular",
+    ClusterName == "undefined"                                              ~ "Undefined",
+    ClusterName == "dirt"                                                   ~ "Dirt"
+  ))
+
+table(dati$broad_type)
+```
+
+We have 4 samples for each patient
+
+```{r}
+samples_list <- split(dati, dati$`File Name`)
+length(samples_list)
+```
+
+Create a single ppp for each sample
+
+```{r}
+marks_name <- c("ClusterName", "neighborhood name", "broad_type")
+ppp_pats <- map(samples_list, function(pat) {
+  # Note: Ensure 'cell_type' column exists in your data. 
+  # If it is named 'ClusterID' or something else, update it here.
+  ppp_creation(pat, marks_name, "X:X", "Y:Y")
+})
+
+# Check the result
+# ppp_pats is now a list of ppp objects, named by patient ID
+print(names(ppp_pats))
+```
+
+Patients data
+
+```{r}
+pat_data <- read_excel("dataset/CRC_TMAs_patient_annotations.xlsx", n_max = 35)
+pat_data <- pat_data |>  mutate(Patient = as.character(Patient))
+head(pat_data)
+```
+
+Let's create an object that can accomodate every kind of object we would need to analyze the dataset,
+for each sample we can add info about, the object is an Hyper Data frame
+
+```{r}
+ppp_hf <- as.hyperframe(ppp = as.solist(ppp_pats))
+ppp_hf <- cbind(ppp_hf, sample_name = unique(dati$`File Name`))
+```
+
+Let's add all the info about the patients
+```{r}
+# 1. Extract unique metadata for each sample (File Name)
+# We select the key and the columns you want to add
+metadata <- dati |> 
+  dplyr::select(`File Name`, 
+    Region, 
+    groups, 
+    patients, 
+    spots) |> 
+  # Keep only one row per unique 'File Name'
+  distinct(`File Name`, .keep_all = TRUE)
+
+# 2. Align the metadata with the hyperframe order
+# We match 'sample_name' from the hyperframe to 'File Name' in the metadata
+matching_indices <- match(ppp_hf$sample_name, metadata$`File Name`)
+
+# 3. Add the columns to the Hyperframe
+# We assign all columns except the key ("File Name")
+cols_to_add <- setdiff(colnames(metadata), "File Name")
+ppp_hf[, cols_to_add] <- metadata[matching_indices, cols_to_add]
+
+# Verify the result
+print(ppp_hf)
+```
+
+
+```{r}
+ppp_df <- dati |> 
+  dplyr::select(`File Name`, 
+    Region, 
+    groups, 
+    patients, 
+    spots,
+    ClusterName,
+    `neighborhood name`,
+    broad_type,
+    `X:X`,
+    `Y:Y`
+    ) |> 
+  mutate(
+    sample = `File Name`,
+    patients = as.character(patients),
+    x = `X:X`,
+    y = `Y:Y`
+  )
+ppp_df <- left_join(ppp_df, pat_data, by = c("patients" = "Patient"))
+```
+
+
+Save the object to work with
+```{r}
+saveRDS(ppp_df, file = "dataset/data_for_spatialplot.rds")
+saveRDS(ppp_hf, file = "dataset/hyperframe_140samples_integrated_info.rds")
+```
+
+
+# Plot
+
+by patients, of course it's wrong
+```{r}
+
+ggplot(ppp_df, aes(x = x, y = y, color = ClusterName)) +
+  # Use a small size and some transparency (alpha) because you have 250k points
+  geom_point(size = 0.1, alpha = 0.5) +
+  
+  # This creates a separate plot for each patient
+  facet_wrap(~ patients, scales = "free") +
+  
+  # Essential for spatial data: keeps the 1:1 aspect ratio of the tissue
+  #coord_fixed() +
+  
+  # Clean up the look
+  theme_minimal() +
+  labs(title = "Spatial Distribution of Clusters by Patient",
+       x = "X Coordinate",
+       y = "Y Coordinate",
+       color = "Cell Type") +
+  
+  # Optional: customize the legend if there are too many categories
+  guides(color = guide_legend(override.aes = list(size = 2, alpha = 1)))
+
+```
+
+by sample
+```{r}
+group_pats <- ppp_df |>
+  distinct(patients) |>
+  mutate(page = ntile(patients, 4)) # Divides patients into 4 equal-sized groups
+```
+
+
+```{r}
+all_plots <- ppp_df |> 
+  left_join(group_pats, by = "patients") |> 
+  group_split(page) |>
+  map(\(page) {
+    
+    num_clusters <- length(unique(ppp_df$`neighborhood name`))
+    my_colors <- as.vector(pals::glasbey(num_clusters))
+    # .x represents each chunk of data
+    ggplot(page, aes(x = x, y = y, color = `neighborhood name`)) +
+      geom_point(size = 0.1, alpha = 0.6) +
+      facet_wrap(~ sample, scales = "free", ncol = 6) +
+      scale_color_manual(values = my_colors) + 
+      #coord_fixed() +
+      theme_minimal() +
+      theme(
+        legend.position = "left",             # Sposta a sinistra
+        legend.text = element_text(size = 6),  # Testo piccolo per risparmiare spazio
+        legend.title = element_text(size = 8), # Titolo piccolo
+        legend.key.size = unit(0.2, "cm"),     # Rimpicciolisce i quadratini della legenda
+        legend.spacing.x = unit(0.1, "cm")     # Riduce lo spazio tra simbolo e testo
+      ) +
+      guides(color = guide_legend(
+        override.aes = list(size = 3, alpha = 1), # Simboli grandi nella legenda
+        ncol = 1                                  # Una sola colonna per occupare meno larghezza
+      )) +
+      
+      labs(title = paste("Patient Spatial Distribution"),
+           x = "X Coordinate", y = "Y Coordinate")
+  })
+
+iwalk(all_plots, ~{
+  ggsave(
+    filename = paste0("Patient_Page_CN", .y, ".png"), 
+    plot = .x, 
+    width = 20,     # Dimensioni grandi per mantenere la risoluzione
+    height = 15, 
+    dpi = 300       # Alta qualità
+  )
+})# Now 'all_plots' is a list of 4 ggplot objects.
+
+# Or save them all to a PDF in one line
+walk(all_plots, print) # 'walk' is like map but for actions (printing)
+```
+
+
+# Quality check and filtering of samples with too low counts
+
+```{r}
+
+all_plots <- ppp_df |> 
+  left_join(group_pats, by = "patients") |> 
+  group_split(page) |>
+  map(\(page) {
+    
+    num_clusters <- length(unique(ppp_df$broad_type))
+    my_colors <- as.vector(pals::glasbey(num_clusters))
+    # .x represents each chunk of data
+    ggplot(page, aes(x = broad_type, fill = broad_type)) +
+      geom_bar() +
+      facet_wrap(~ sample, scales = "free_y") + # Using 'sample' as requested
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        legend.position = "none" # Hide legend since X axis has the labels
+      ) +
+      labs(
+        x = "Broad Cell Type", 
+        y = "Cell Count", 
+        title = "Distribution of Cell Lineages per Sample"
+      )
+  })
+walk(all_plots, print)
+```
+
+
+```{r}
+library(gt) # nice tables i guess
+
+summary_df <- ppp_df |> 
+    group_by(patients) |> 
+    count(sample, broad_type)
+
+# 2. Split by patient and map to gt tables
+table_list <- summary_df |>
+  group_split(patients) |>
+  map(function(df) {
+    df |>
+      ungroup() |>
+      #select(-patients) |>  # Remove patient column (it will go in the title)
+      gt() |>
+      tab_header(
+        title = paste("Patient ID:", unique(df$patients))
+      )
+  })
+
+# View the table for the first patient
+walk(table_list, print)
+```
+
+```{r}
+target_types <- c("Tumor", "Myeloid", "T cells")
+
+# 1. Generate the counts dataframe (as established previously)
+counts_df <- map_dfr(ppp_hf$ppp, function(x) {
+  current_types <- x$marks$broad_type 
+  target_types %>%
+    set_names() %>%
+    map_int(~ sum(current_types == .x, na.rm = TRUE))
+})
+# Add sample names for identification
+counts_df$sample_name <- ppp_hf$sample_name
+
+# 2. Extract the top N samples for EACH target type
+# This creates a list where each element corresponds to a cell type
+top_performers <- map(target_types, function(type) {
+  
+  counts_df %>%
+    # Sort by the current type in descending order
+    arrange(desc(.data[[type]])) %>%
+    # Take the top 5 (change 'n' to whatever number you need)
+    slice_head(n = 5) %>%
+    # Add a column to indicate which type was used for sorting
+    mutate(Sorted_By = type)
+})
+
+# Name the list elements for easy access
+names(top_performers) <- target_types
+
+# --- View the results ---
+
+# See the samples with the most Tumor cells (and their other counts)
+print("Top samples for Tumor:")
+print(top_performers[["Tumor"]])
+
+# See the samples with the most Myeloid cells
+print("Top samples for Myeloid:")
+print(top_performers[["Myeloid"]])
+
+# See the samples with the most T cells
+print("Top samples for T cells:")
+print(top_performers[["T cells"]])
+
+
+
+```
+
+

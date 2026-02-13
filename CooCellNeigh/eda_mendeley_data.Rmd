@@ -1,0 +1,451 @@
+---
+title: "eda_mendeley_data"
+author: "Valerio Reffo"
+date: "2026-01-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(purrr)
+library(spatstat)
+library(fda)
+library(forcats)
+library(patchwork)
+```
+
+```{r}
+ppp_pats <- readRDS("dataset/ppp_obj_tumor_merged.rds")
+```
+
+patients info
+```{r}
+pat_data <- read_excel("dataset/CRC_TMAs_patient_annotations.xlsx", n_max = 35)
+pat_data <- pat_data |>  mutate(Patient = as.character(Patient))
+```
+
+
+Subsetting only the 2 marks of interest, Tumor and Immune cells
+
+```{r}
+ppp_pats <- map(ppp_pats, \(pat) {subset(pat, marks %in% c("Tumor", "Immune-infiltrated stroma"), drop = TRUE)})
+```
+
+# Plots of the point processes
+
+Let's create the df for the plots with annotations about patients 
+```{r}
+ppp_df <- imap_dfr(ppp_pats, function(ppp, name) {
+  # Defensive: skip empty ppp objects
+  if (ppp$n == 0) return(NULL)
+  data.frame(
+    x = ppp$x,
+    y = ppp$y,
+    mark = marks(ppp),
+    patient = name
+  )
+}) 
+ppp_df <- left_join(ppp_df, pat_data, by = c("patient" = "Patient"))
+```
+
+
+
+```{r}
+ggplot(ppp_df, aes(x = x, y = y, color = mark)) +
+  geom_point(size = 0.4, alpha = 0.7) +
+  facet_wrap(~ patient) +
+  coord_fixed() +
+  labs(title = "Point process of the patients", color = "Cell type") +
+  theme_minimal()
+```
+
+Histogram of the 2 marks for each patient
+```{r}
+ggplot(ppp_df, aes(x = mark, fill = mark)) +
+  geom_bar() +
+  facet_wrap(~ patient, scales = "free_y") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    x = "Cell type (mark)",
+    y = "Count",
+    title = "Histogram of marks per patient"
+  )
+```
+
+Explore the effect of single covariates, let's compare the number of points in the point processes for each variable
+
+Let's work with the hyperframe so it's easier (?) to manage the variables
+```{r}
+pats_names <- sapply(names(ppp_pats), \(name) {paste0("Patient",name)}, simplify = T)
+names(ppp_pats) <- pats_names
+pats_hf <- as.solist(ppp_pats)
+(pats_hf <- as.hyperframe(ppp = pats_hf, row.names = names(ppp_pats)))
+pats_hf$n <- with(pats_hf, npoints(ppp))
+pats_hf$patients <- names(ppp_pats)
+pats_hf$area <- with(pats_hf, area.owin(ppp$window))
+pats_hf <- cbind(pats_hf, pat_data[!(rownames(pat_data) %in% c(9,19) ),colnames(pat_data) %in% c("Group", "Sex", "Age", "Full_Histology", "Full_Tumor_Location",  "Simple_Tumor_Location")])
+```
+
+
+```{r}
+var_colors <- c("Group", "Sex", "Full_Tumor_Location", "Full_Histology")
+
+map(var_colors, \(color){
+  form <- as.formula(paste("sqrt(n) ~", color))
+  boxplot(form, data = pats_hf)
+  v <- pretty(pats_hf$n); axis(4, at=sqrt(v), labels=v)
+  title(paste0(color, " variable"))
+})
+```
+
+With mean intensity
+```{r}
+map(var_colors, \(color){
+  form <- as.formula(paste("n/area ~", color))
+  aggregate(form, data = pats_hf, FUN = \(x) {mean(x)*1000})
+})
+```
+IF we have windows of different area we better weight the average
+
+Group
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Group), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Group), sum)
+ntot/atot*1000
+```
+
+Sex
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Sex), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Sex), sum)
+ntot/atot*1000
+```
+
+Full Tumor Location
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Full_Tumor_Location), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Full_Tumor_Location), sum)
+ntot/atot*1000
+```
+
+Full Histology
+```{r}
+ntot <- sapply(split(pats_hf$n, pats_hf$Full_Histology), sum)
+atot <- sapply(split(pats_hf$area, pats_hf$Full_Histology), sum)
+ntot/atot*1000
+```
+
+
+Fun for plotting different categorical variables
+```{r}
+fsplit_plot <- function(data, factor) {
+  factor_quo <- enquo(factor)
+  split_list <- data |> group_split(!!factor_quo)
+  group_label <- as_label(factor_quo)
+  
+  walk(split_list, function(single_group) {
+    # Extract the group value for this group (as character)
+    gval <- unique(single_group[[group_label]])[1]
+    plt <- ggplot(single_group, aes(x = x, y = y, color = mark)) +
+      geom_point(size = 0.7, alpha = 0.7) +
+      facet_wrap(~ patient) +
+      coord_fixed() +
+      labs(title = paste("Points from patients -", group_label, "=", gval),
+           color = "Cell type") +
+      theme_minimal()
+    print(plt)
+  })
+}
+```
+
+## split by categories
+
+Split by "Group":
+                  Group == 1 : Crohn's like reaction (CLR)
+                  Group == 2 : diffuse inflammatory infiltration (DII)
+                  
+In the context of pathology (specifically colorectal cancer and inflammatory bowel disease), CLR and DII describe how the body’s immune system organizes its response at the tumor periphery or within tissue.
+The primary difference lies in organization and density.
+
+
+Group == 1 : Crohn's like reaction (CLR)
+
+CLR refers to the presence of discrete, organized lymphoid follicles (clusters of immune cells) located at the advancing edge of a tumor. It is named "Crohn's-like" because these lymphoid aggregates resemble the patterns seen in Crohn's disease.
+
+    Appearance: Distinct "nodules" or "balls" of immune cells (mostly B-cells and T-cells).
+
+    Location: Usually found in the subserosa or the outer layers of the tissue, away from the immediate tumor mass.
+
+    Clinical Significance: Generally considered a positive prognostic sign. It indicates that the patient's immune system is highly organized and actively "patrolling" or mounting a structured defense against the cancer.
+
+2. Diffuse Inflammatory Infiltration (DII)
+
+DII is characterized by a "spread out" or non-organized wave of immune cells (lymphocytes, plasma cells, neutrophils) that permeate the tissue.
+
+    Appearance: A continuous, messy "cloud" or sheet of immune cells rather than distinct nodules.
+
+    Location: Usually seen directly at the invasive front where the tumor meets healthy tissue, often appearing as a thick band of inflammation.
+
+    Clinical Significance: While it shows an immune response is present, it lacks the sophisticated organization of CLR. In some scoring systems (like the Klintrup-Mäkinen score), a high DII is still better than no inflammation, but it is a physiologically different recruitment method than follicle formation.
+
+```{r}
+fsplit_plot(ppp_df, Group)
+```
+
+Sex
+```{r}
+fsplit_plot(ppp_df, Sex)
+```
+
+Full histology
+
+```{r}
+fsplit_plot(ppp_df, Full_Histology)
+```
+
+Full_Tumor_Location
+
+```{r}
+fsplit_plot(ppp_df, Full_Tumor_Location)
+```
+
+```{r}
+Lfun_list <- Lcross_smooth(ppp_pats, centrata = T, rmax = 150)
+```
+
+Plot of the Lcross smoothed function colored by different patients' characteristics
+
+```{r}
+var_colors <- c("Group", "Sex", "Full_Tumor_Location", "Full_Histology")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = NULL,
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+
+```
+
+Facet by Sex
+```{r}
+var_colors <- c("Group", "Full_Tumor_Location", "Full_Histology")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Sex",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+Facet by Group
+```{r}
+var_colors <- c("Sex", "Full_Tumor_Location", "Full_Histology")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Group",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+Facet by Full_Histology
+```{r}
+var_colors <- c("Group", "Sex", "Full_Tumor_Location")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Full_Histology",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+Facet by Full_Tumor_Location
+```{r}
+var_colors <- c("Group", "Sex", "Full_Histology")
+
+walk(var_colors, \(color) {
+  plt <- plot_fd_gg_meta(
+    fdobj    = Lfun_list$fd,
+    meta_df  = pat_data,
+    id_col   = "Patient",
+    color_by = color,
+    facet_by = "Full_Tumor_Location",
+    label_curves = TRUE,    # Add the labels
+    label_var = "Patient",   # The variable to show as text,
+    grid_length = 50
+  )
+  print(plt)
+})
+```
+
+
+# spatial plot group by Lcross behaviour
+
+Function to plot a subset of the ppp
+```{r}
+multi_patient_plot <- function(data, patients, filter_factor = NULL, factor_name = NULL, pp_type) {
+  # Coerce patient types to character for robust comparison
+  data$patient <- as.character(data$patient)
+  patients <- as.character(patients)
+  plot_df <- data %>% filter(patient %in% patients)
+  
+  # Optionally filter by group/factor
+  if (!is.null(filter_factor) && !is.null(factor_name)) {
+    plot_df <- plot_df %>% filter(.data[[factor_name]] == filter_factor)
+    main_title <- paste0("Patients: ", paste(patients, collapse=", "), 
+                         " (", factor_name, "=", filter_factor, ")")
+  } else {
+    main_title <- paste0("Patients: ", paste(patients, collapse=", "), ". Type: ", pp_type)
+  }
+
+  ggplot(plot_df, aes(x = x, y = y, color = mark)) +
+    geom_point(size = 0.4, alpha = 0.7) +
+    facet_wrap(~ patient) +
+    coord_fixed() +
+    labs(title = main_title, color = "Cell type") +
+    theme_minimal()
+}
+```
+
+Patients in which the 2 cell type show the strongest association then in the other patients
+```{r}
+clust_plot <- multi_patient_plot(ppp_df, patients = c(29, 11, 6), pp_type = "Positive association")
+```
+
+Patients which show negative association between the 2 cell types
+
+```{r}
+reg_plot <- multi_patient_plot(ppp_df, patients = c(14, 13, 5), pp_type = "Negative association")
+```
+
+At last the patients showing indipendence between the cell types
+```{r}
+csr_plot <- multi_patient_plot(ppp_df, patients = c(2, 23, 16), pp_type = "Indipendence")
+```
+
+```{r}
+clust_plot/csr_plot/reg_plot
+```
+
+```{r}
+pat_data |> 
+  filter(Patient %in% c(11, 29, 6))
+
+pat_data |> 
+  filter(Patient %in% c(16, 2, 23))
+
+pat_data |> 
+  filter(Patient %in% c(13, 14, 5))
+```
+
+# ------------------------------------------------------------------------------
+
+# Functional PCA
+
+```{r}
+#Lfun_list <- Lcross_smooth(ppp_pats, centrata = T, rmax = 150)
+```
+
+```{r}
+plot(Lfun_list$fd)
+lines(c(0,350), c(0,0), col = "gold", lwd = 2)
+```
+
+```{r}
+fpca <- pca.fd(Lfun_list$fd, nharm = 4, Lfun_list$fdPar)
+rownames(fpca$scores) <- Lfun_list$fd$fdnames$Gene # "nome" dei pazienti (numero del paziente)
+```
+
+```{r}
+plot(fpca$scores[,1], fpca$scores[,2], pch = 3, main = "scores")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+text(fpca$scores[,1], fpca$scores[,2], 
+     labels = rownames(fpca$scores), 
+     pos = 3, 
+     cex = 0.7, 
+     col = "blue")
+```
+
+```{r}
+varmx.pca.fd(fpca) |> plot.pca.fd()
+```
+
+
+# Inhomogeneus processes
+
+Intensity estimate - I'll use just the observed pattern
+```{r}
+# list through patients and through marks to estimate bandwith of the gaussian kernel
+bw_list <- map(ppp_pats, \(singlep){
+  map(split.ppp(singlep), \(singlem){bw.diggle(singlem)})
+})
+# kernel estimate of the intensity
+Linhom_list <- funcross_inhom_smooth(ppp_pats, fun = Lcross.inhom, centrata = T, rmax = 150)
+```
+
+```{r}
+Linhom_list <- map(ppp_pats, function(pat){
+    # sigma estimate for each mark
+    bw_list <- map(split.ppp(pat), \(singlem){bw.diggle(singlem)})
+    # intensity estimate for each mark
+    lambdaT <- density.ppp(split.ppp(pat)$Tumor, 
+                           sigma=bw_list$Tumor, at="points")
+    lambdaS <- density.ppp(split.ppp(pat)$`Immune-infiltrated stroma`, 
+                           sigma=bw_list$`Immune-infiltrated stroma`, at="points")
+    Lcross.inhom(pat, "Tumor", "Immune-infiltrated stroma", 
+                 lambdaT, lambdaS, 
+                 correction = "best", r = Lfun_list$r)
+})
+```
+
+```{r}
+iwalk(Linhom_list, \(Lsingle, name){
+  plot(Lsingle, .-r~r, main = name)
+})
+```
+
