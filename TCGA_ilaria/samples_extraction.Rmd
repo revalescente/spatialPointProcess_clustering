@@ -1,0 +1,564 @@
+---
+title: "Embedding PCA"
+author: "Valerio Reffo"
+date: "2026-02-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta)
+library(data.table)
+library(purrr)
+#library(ImageFeatureTCGA)
+library(Rtsne)
+library(ggplot2)
+#source("~/repositories/spatialPointProcess_clustering/helper_function.R", echo = TRUE)
+# survival analysis
+library(survival)
+library(survminer)
+```
+
+```{r}
+pgp_emb <- fread("/mnt/ganimede/shared/imageFeatureTCGA_OV/provgigapath/slide_level/TCGA-WR-A838-01Z-00-DX1.5FE22DE4-CEFB-45F6-9299-505023A8F3BA.csv.gz", 
+                  quote = "\"", 
+                  fill = TRUE)
+# pgp_emb2 <- read.csv("/mnt/ganimede/shared/imageFeatureTCGA_OV/provgigapath/slide_level/TCGA-WR-A838-01Z-00-DX1.5FE22DE4-CEFB-45F6-9299-505023A8F3BA.csv.gz")
+```
+
+# Codice di copilot per processare gli embeddings e fare PCA
+
+1. Define folder and get all csv.gz files
+```{r}
+folder_path <- "/mnt/ganimede/shared/imageFeatureTCGA_OV/provgigapath/slide_level"
+file_list <- list.files(folder_path, pattern = "\\.csv\\.gz$", full.names = TRUE)
+```
+
+
+2. Function to clean the PyTorch string and convert to numeric vector
+```{r}
+parse_tensor_string <- function(tensor_str) {
+  # Remove "tensor([[", "]])", and newlines (\n)
+  clean_str <- gsub("tensor\\(\\[\\[|\\]\\]\\)", "", tensor_str)
+  clean_str <- gsub("\n", "", clean_str)
+  
+  # Split by comma
+  split_str <- strsplit(clean_str, ",")[[1]]
+  
+  # Convert to numeric (R automatically handles scientific notation like 5.4e-02)
+  num_vec <- as.numeric(trimws(split_str))
+  
+  return(num_vec)
+}
+```
+
+
+3. Function to process a single file
+```{r}
+process_slide <- function(file_path) {
+  # Read the single row of data
+  dt <- fread(file_path, quote = "\"", fill = TRUE, showProgress = FALSE)
+  
+  slide_id <- dt$slide_name[1]
+  
+  # --- Extract just the last layer (Recommended) ---
+  features <- parse_tensor_string(dt$last_layer_embed[1])
+  
+  # --- ALTERNATIVE: If you truly want ALL layers concatenated (Layers 0 to 12) ---
+  # embed_cols <- c(paste0("layer_", 0:12, "_embed"), "last_layer_embed")
+  # parsed_layers <- lapply(dt[, ..embed_cols], parse_tensor_string)
+  # features <- unlist(parsed_layers)
+  
+  return(list(slide_name = slide_id, features = features))
+}
+```
+
+
+4. Loop over all files
+```{r}
+# (Tip: test this on the first 5 files first by using file_list[1:5])
+cat("Processing", length(file_list), "slides...\n")
+parsed_data <- map(file_list, process_slide)
+
+# 5. Build the final matrix
+# Bind all feature vectors as rows
+pca_matrix <- do.call(rbind, map(parsed_data, function(x) x$features))
+
+# Set the row names to the slide names
+rownames(pca_matrix) <- sapply(parsed_data, function(x) x$slide_name)
+
+cat("Done! Matrix dimensions:", dim(pca_matrix)[1], "rows (slides) x", dim(pca_matrix)[2], "columns (features)\n")
+```
+
+```{r}
+# Run PCA (center and scale the features)
+pca_res <- prcomp(pca_matrix, center = T, scale. = T)
+
+# Plot the variance explained
+plot(pca_res, type = "l", main = "PCA Variance")
+
+# Get your PC scores for plotting (e.g., PC1 and PC2)
+pc_scores <- as.data.frame(pca_res$x)
+rownames(pc_scores) <- rownames(pca_res$x)
+head(pc_scores[, 1:2])
+```
+
+```{r}
+var_explained <- summary(pca_res)$importance[2, 1:2] * 100
+var_explained <- round(var_explained, 1) # Round to 1 decimal place
+plot(
+  x = pca_res$x[, "PC1"], 
+  y = pca_res$x[, "PC2"],
+  xlab = paste0("PC1 (", var_explained[1], "%)"),
+  ylab = paste0("PC2 (", var_explained[2], "%)"),
+  main = "PCA of Prov-GigaPath Slide Embeddings",
+  pch = 19,                     # Solid circles
+  col = rgb(0.1, 0.4, 0.8, 0.6),# Nice translucent blue
+  cex = 1.2                     # Slightly larger points
+)
+
+# 3. Add a grid in the background to make it easier to read
+grid(col = "lightgray", lty = "dotted")
+```
+
+```{r}
+highest_pc1 <- rownames(pc_scores)[order(pc_scores$PC1, decreasing = TRUE)[1:2]]
+
+# 2 samples with the LOWEST PC1
+lowest_pc1 <- rownames(pc_scores)[order(pc_scores$PC1, decreasing = FALSE)[1:2]]
+
+# 2 samples with the LOWEST PC2
+lowest_pc2 <- rownames(pc_scores)[order(pc_scores$PC2, decreasing = FALSE)[1:2]]
+
+# Combine them into a final list of 6 sample names
+(selected_samples <- c(highest_pc1, lowest_pc1, lowest_pc2))
+```
+
+# t-SNE
+
+```{r}
+set.seed(42) # t-SNE is stochastic, set seed for reproducibility
+tsne_out <- Rtsne(pc_scores[,1:30], dims = 2, perplexity = 30, verbose = TRUE, check_duplicates = FALSE)
+
+# 3. Prepare data for plotting
+# Combine the t-SNE coordinates with your original metadata (e.g., labels)
+tsne_plot_data <- data.frame(
+  TSNE1 = tsne_out$Y[, 1],
+  TSNE2 = tsne_out$Y[, 2]
+  # Assuming 'my_labels' is a vector of your groups/classes corresponding to the rows
+)
+
+# 4. Plot with ggplot2
+ggplot(tsne_plot_data, aes(x = TSNE1, y = TSNE2)) +
+  geom_point(size = 2, alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "t-SNE Projection (from PCA)",
+       subtitle = "Perplexity = 30",
+       x = "t-SNE Dimension 1",
+       y = "t-SNE Dimension 2") +
+  scale_color_viridis_d() # Optional: nice color palette
+```
+
+# K-means on the embeddings
+
+```{r}
+set.seed(123)
+clusters <- kmeans(pca_matrix, 4)
+table(clusters$cluster)
+```
+
+plot of the clusters on the tSNE
+```{r}
+tsne_plot_data <- data.frame(
+  TSNE1 = tsne_out$Y[, 1],
+  TSNE2 = tsne_out$Y[, 2],
+  clusters = as.factor(clusters$cluster)
+  # Assuming 'my_labels' is a vector of your groups/classes corresponding to the rows
+)
+
+# 4. Plot with ggplot2
+ggplot(tsne_plot_data, aes(x = TSNE1, y = TSNE2, color = clusters)) +
+  geom_point(size = 2, alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "t-SNE Projection (from PCA)",
+       subtitle = "Perplexity = 30",
+       x = "t-SNE Dimension 1",
+       y = "t-SNE Dimension 2")
+ 
+```
+
+PCA plot colored by clusters
+```{r}
+pca_data <- as.data.frame(pca_res$x)
+
+# Ensure the row names of pca_data match the names in clusters$cluster if they aren't in the exact same order.
+# If they are already aligned, you can just assign: pca_data$Cluster <- as.factor(clusters$cluster)
+# However, merging by name is safer:
+pca_data$SampleID <- rownames(pca_data)
+
+# Convert clusters to a dataframe for merging
+cluster_df <- data.frame(
+  SampleID = names(clusters$cluster),
+  Cluster = as.factor(clusters$cluster) # Convert to factor for categorical coloring
+)
+
+# Merge to ensure correct mapping
+plot_data <- left_join(pca_data, cluster_df, by = "SampleID")
+
+# 2. Get Variance Explained (reusing your logic)
+var_explained <- summary(pca_res)$importance[2, 1:2] * 100
+var_explained <- round(var_explained, 1)
+
+# 3. Create the Plot
+ggplot(plot_data, aes(x = PC1, y = PC2, color = Cluster)) +
+  # Add points with some transparency
+  geom_point(size = 3, alpha = 0.7) + 
+  
+  # Optional: Add ellipses to visualize cluster boundaries
+  #stat_ellipse(level = 0.95, linetype = "dashed", size = 0.5, show.legend = FALSE) +
+  
+  # Labels and Titles
+  labs(
+    title = "PCA of Prov-GigaPath Slide Embeddings",
+    x = paste0("PC1 (", var_explained[1], "%)"),
+    y = paste0("PC2 (", var_explained[2], "%)"),
+    color = "Cluster"
+  ) +
+  
+  # Theme and Colors
+  theme_minimal() +
+  scale_color_viridis_d(option = "D") + # 'viridis' is colorblind-friendly and distinct
+  theme(
+    panel.grid.major = element_line(color = "lightgray", linetype = "dotted"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+
+
+# Survival analysis
+
+## Extract survival times
+
+file with info about patients
+```{r}
+library(ExperimentHub)
+library(curatedTCGAData)
+ov_meta <- curatedTCGAData(diseaseCode = "OV", assays = "*", version = "1.1.38", dry.run = FALSE)
+
+ov_meta |> head()
+
+ov_meta <- colData(ov_meta) %>% as.data.frame
+
+# select clinical meta data
+columns_to_select <- c(
+  "patientID",                             # patient id
+  "vital_status",                          # Survival status
+  "years_to_birth",                          # Birth date
+  "days_to_death",                         # Time variable for deceased patients
+  "days_to_last_followup",                 # Time variable for censored patients
+  "patient.age_at_initial_pathologic_diagnosis", # Age 
+  "gender",                                # Gender/Sex
+  "ethnicity",                             # Ethnicity
+  "patient.anatomic_neoplasm_subdivision" # Anatomic site 
+  # TBD adding other vars of interest
+
+)
+
+# Select the vars
+ov_meta_select <- ov_meta[, columns_to_select, drop = FALSE]
+ov_meta_select |> head()
+```
+
+
+samples names, there are 107 samples for 106 patient
+```{r}
+
+file_list <- list.files("/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/h5ad", pattern = "\\.h5ad$", full.names = TRUE)
+(sample_names <- tools::file_path_sans_ext(basename(file_list)))
+(patient_ids_from_files <- substr(sample_names, 1, 12))
+```
+
+```{r}
+ov_meta_matched <- ov_meta_select |> 
+  filter(patientID %in% patient_ids_from_files)
+
+# Check the result
+head(ov_meta_matched)
+```
+
+cluster setup
+```{r}
+slide_names <- rownames(clusters) 
+if (is.null(slide_names)) slide_names <- names(clusters$cluster)
+
+# 2. Create a clean dataframe with Slide Name, Patient ID, and Cluster
+ov_df <- data.frame(
+  slide_name = slide_names,
+  # Extract the first 12 characters to get the patientID (e.g., "TCGA-13-A5FT")
+  patientID = substr(slide_names, 1, 12), 
+  cluster = clusters$cluster,
+  stringsAsFactors = FALSE
+)
+
+# 3. Merge the cluster data with the metadata
+# This will automatically duplicate the metadata rows for patients with multiple slides!
+ov_meta_matched <- ov_df %>%
+  left_join(ov_meta_select, by = "patientID")
+
+# 4. Optional: Set the row names of the new dataframe to the slide names
+rownames(ov_meta_matched) <- ov_meta_matched$slide_name
+
+# Check the result!
+head(ov_meta_matched)
+```
+
+
+## Survival analysis 
+
+Variables setup 
+```{r}
+ov_meta_matched <- ov_meta_matched |> 
+  mutate(
+    time = ifelse(!is.na(days_to_death), days_to_death, days_to_last_followup),
+    event = ifelse(!is.na(days_to_death), 1, 0)
+  )
+```
+
+```{r}
+fit <- survfit(Surv(time, vital_status) ~ cluster, data = ov_meta_matched)
+km_plot <- ggsurvplot(fit, data = ov_meta_matched, risk.table = TRUE, pval = TRUE, xlim = c(0,3000))
+pairwise_survdiff(Surv(time, vital_status) ~ cluster, data = ov_meta_matched)
+```
+
+## check the groups
+
+Checking if I made some mistakes in copying clusters elements
+```{r}
+cluster_patients_df <- ov_meta_matched |> 
+  group_by(cluster) |> 
+  summarise(
+    # paste(unique(...)) ensures that if a patient has 2 slides in the same cluster, 
+    # their ID only prints once in the list
+    patient_IDs = paste(unique(patientID), collapse = ", ")
+  ) |> 
+  arrange(cluster)
+
+km_result_pats <- clusters
+
+# Print the resulting dataframe
+print(cluster_patients_df)
+
+orig_slide_names <- names(clusters$cluster)
+orig_clusters <- as.numeric(clusters$cluster)
+
+# 2. Extract the patient IDs (first 12 characters) from those original slide names
+orig_patient_ids <- substr(orig_slide_names, 1, 12)
+
+# 3. Create a temporary dataframe from the original data, group, and collapse
+orig_summary_df <- data.frame(
+  cluster = orig_clusters,
+  patientID = orig_patient_ids,
+  stringsAsFactors = FALSE
+) %>%
+  group_by(cluster) %>%
+  summarise(
+    original_patient_IDs = paste(unique(patientID), collapse = ", ")
+  )
+
+# 4. Join this directly into your existing cluster_patients_df
+cluster_patients_df <- cluster_patients_df %>%
+  left_join(orig_summary_df, by = "cluster") %>%
+  # Add a check to confirm they are exactly identical!
+  mutate(is_match = (patient_IDs == original_patient_IDs))
+
+# Print it to check!
+print(cluster_patients_df)
+```
+
+# Saving list of patientID per clusters
+
+```{r}
+saveRDS(ov_meta_matched, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/survival_dataset_&_metadata.rds")
+```
+
+```{r}
+# Set a seed so you get the exact same random samples if you rerun the code
+set.seed(42) 
+
+random_5_per_cluster <- ov_meta_matched |>
+  # 1. Keep only unique patients per cluster so we don't sample the same person twice
+  distinct(cluster, patientID) |>
+  # 2. Group by cluster
+  group_by(cluster) |>
+  # 3. Randomly pull exactly 5 rows (if a cluster has fewer than 5, it pulls all of them)
+  slice_sample(n = 5) |>
+  ungroup() |>
+  # Keep just the columns you care about
+  select(cluster, patientID)
+
+# Print the final dataframe
+print(random_5_per_cluster)
+
+# If you need them as a simple flat vector of IDs to use later:
+vector_of_ids <- random_5_per_cluster$patientID
+```
+
+```{r}
+repeated_patients_check <- ov_meta_matched |>
+  group_by(patientID) |>
+  # Keep only patients that appear more than once (have multiple slides)
+  filter(n() > 1) |> 
+  summarise(
+    num_slides = n(),
+    # Count how many unique clusters this patient's slides were assigned to
+    num_unique_clusters = n_distinct(cluster), 
+    # List the exact clusters assigned
+    assigned_clusters = paste(cluster, collapse = ", "),
+    # List the slides just in case you want to check them
+    slide_names = paste(slide_name, collapse = ", ")
+  ) |>
+  # If num_unique_clusters == 1, then all their slides are in the same group!
+  mutate(all_in_same_group = (num_unique_clusters == 1)) |>
+  arrange(all_in_same_group) # Put any FALSE ones at the top so they are easy to spot
+
+```
+Il paziente ripetente è giustamente assegnato solo al cluster 4. 
+
+
+# Filtering images with double tissues
+```{r}
+good_sample_names <- c(
+  "TCGA-13-A5FU-01Z-00-DX1.9AD9E4B9-3F87-4879-BC0F-148B12C09036",
+  "TCGA-23-1021-01Z-00-DX1.F07C221B-D401-47A5-9519-10DE59CA1E9D",
+  "TCGA-23-1022-01Z-00-DX1.AF9E523E-CB0F-4AB5-AD43-C96731BF9141",
+  "TCGA-23-1023-01Z-00-DX1.0C96E118-A4D9-4A9A-B95E-C0AA114D2483",
+  "TCGA-23-1024-01Z-00-DX1.B9194D3F-C6F4-4FC8-B0CA-6E347FF4F885",
+  "TCGA-23-1026-01Z-00-DX1.2875B4F7-D6B2-4C72-8A68-4E7C92D04BF0",
+  "TCGA-23-1027-01Z-00-DX1.53F9DFF4-6811-4184-B2FD-1F6706B948FD",
+  "TCGA-23-1028-01Z-00-DX1.117B4B7B-F796-4D33-A645-CD80E5C43E6D",
+  "TCGA-23-1029-01Z-00-DX1.0044B39A-51B3-4F76-90A9-00CDF851DE2A",
+  "TCGA-23-1030-01Z-00-DX1.FC93147F-FB55-4C62-B187-337A5C107096",
+  "TCGA-23-1031-01Z-00-DX1.12B1996D-E5BB-424C-B59E-4BE7E1ED6BA1",
+  "TCGA-23-1032-01Z-00-DX1.0C1074AE-D59C-4C74-B929-593AE89E5DC1",
+  "TCGA-23-1107-01Z-00-DX1.5B9C1283-62B5-4329-873D-009FA939CA69",
+  "TCGA-23-1110-01Z-00-DX1.61C2DBB8-7F5C-4878-BEDC-6AE061A2D7D4",
+  "TCGA-23-1111-01Z-00-DX1.A99421E1-C73E-42AE-990F-E5E6D26EDDBE",
+  "TCGA-23-1113-01Z-00-DX1.D72B1587-444A-4DEC-8D92-703699822BE2",
+  "TCGA-23-1114-01Z-00-DX1.26CCA42E-4947-4318-A983-D3B31603482E",
+  "TCGA-23-1116-01Z-00-DX1.FC5FC1E1-56DD-498C-AA9F-4434C6E733A8",
+  "TCGA-23-1117-01Z-00-DX1.783914B6-B079-4828-B77B-4C6306FAE4C1",
+  "TCGA-23-1118-01Z-00-DX1.D69E130E-33C7-4F8A-99AF-400B81378578",
+  "TCGA-23-1119-01Z-00-DX1.44D3D70A-A421-4962-8385-2A3CF8E9880A",
+  "TCGA-23-1120-01Z-00-DX1.59367B12-17F1-41AA-A6FB-8D940365176A",
+  "TCGA-23-1121-01Z-00-DX1.E2F25441-32C3-46BF-A845-CB4FA787E8CB",
+  "TCGA-23-1122-01Z-00-DX1.991C230C-E3B4-4DAC-9DCC-69E9FA7DF772",
+  "TCGA-23-1123-01Z-00-DX1.764A8E5C-F2E7-441D-B9FB-23ECF7183740",
+  "TCGA-23-1809-01Z-00-DX1.A8767DEC-EB1A-4EDC-906E-C0560A30455F",
+  "TCGA-23-2072-01Z-00-DX1.478243FF-BFF0-48A4-ADEA-DE789331A50E",
+  "TCGA-23-2077-01Z-00-DX1.9EB664FA-CC13-4A49-89BA-8A4573CE48F1",
+  "TCGA-23-2078-01Z-00-DX1.E31A9C1E-00EF-4B0D-A15D-6A5C2D00E986",
+  "TCGA-23-2081-01Z-00-DX1.4105A382-4C2B-4C62-AC93-CB21CC360254",
+  "TCGA-23-2641-01Z-00-DX1.DB792236-39EC-4090-9938-B0915C3378A0",
+  "TCGA-23-2643-01Z-00-DX1.E60DF03D-326E-4182-84DA-77263C4C52B3",
+  "TCGA-23-2645-01Z-00-DX1.72C0AB89-9A64-4656-B03E-A5D65BA03188",
+  "TCGA-23-2647-01Z-00-DX1.21E5D0D8-6BA8-4D49-BA70-EC228CF10387",
+  "TCGA-23-2649-01Z-00-DX1.C94C3B32-D5F5-4A85-9F35-50B377FF9E75",
+  "TCGA-25-1312-01Z-00-DX1.733EC7A7-0FC8-4DDC-B366-DF5A45D6BB4E",
+  "TCGA-25-1313-01Z-00-DX1.5A2732D5-01D6-4285-9283-1839E1703C27",
+  "TCGA-25-1314-01Z-00-DX1.E01C2237-E2D6-4D84-9FB4-624734F30375",
+  "TCGA-25-1315-01Z-00-DX1.BC434CCE-7E21-479F-8A5D-1FC7F601C8C5",
+  "TCGA-25-1316-01Z-00-DX1.A9B7F47C-5BDC-4B7D-BC9F-C4C9DBA663C8",
+  "TCGA-25-1317-01Z-00-DX1.2E7A7AF9-4D04-4EBD-8C79-7117F76511D5",
+  "TCGA-25-1318-01Z-00-DX1.742CB28E-DB0A-4BE1-8047-5265FE80F861",
+  "TCGA-25-1319-01Z-00-DX1.71EFB946-ACAF-4BA6-8855-D336268D87F0",
+  "TCGA-25-1320-01Z-00-DX1.30C154CE-C75B-4815-BF05-7D011B761993",
+  "TCGA-25-1321-01Z-00-DX1.56C898D8-14CE-4C2D-B5C9-AC33FF91FE68",
+  "TCGA-25-1322-01Z-00-DX1.20DA1932-908F-44E5-B2F2-43E41E06165B",
+  "TCGA-25-1323-01Z-00-DX1.1B82D1C9-2310-4AAB-B531-45C1191E5FF8",
+  "TCGA-25-1324-01Z-00-DX1.37D77658-1D25-49B2-8CDE-FC092EAA4CDF",
+  "TCGA-25-1325-01Z-00-DX1.FA0DD977-D2F2-4319-B614-3EB20E966D97",
+  "TCGA-25-1326-01Z-00-DX1.686E3548-8891-42ED-ABBA-BE3DA6D4CAAB",
+  "TCGA-25-1328-01Z-00-DX1.A0145C96-19A9-4F2D-8570-ECF039F99405",
+  "TCGA-25-1329-01Z-00-DX1.6DD994F3-E426-4749-8ECA-9A0B87FF04DC",
+  "TCGA-25-1623-01Z-00-DX1.28D89405-5F27-47CF-ABC7-01AB494C28D2",
+  "TCGA-25-1625-01Z-00-DX1.64A0B073-8EC8-4BE1-BECA-B956A6A96FCC",
+  "TCGA-25-1626-01Z-00-DX1.2C6EA1FE-8063-40AC-B81A-CC0A630FCFCC",
+  "TCGA-25-1627-01Z-00-DX1.7596F7F5-D705-46B4-B3A6-833D31482D28",
+  "TCGA-25-1630-01Z-00-DX1.75C53351-1511-4CCE-97AC-1650010AC568",
+  "TCGA-25-1634-01Z-00-DX1.6E449C67-922B-409A-84B4-581B9B468682",
+  "TCGA-25-1635-01Z-00-DX1.D21D2855-43F0-4766-934A-3CE1E3A099B9",
+  "TCGA-25-1870-01Z-00-DX1.780BB62D-71C1-4B21-A2F4-61AC4B0234EE",
+  "TCGA-25-1871-01Z-00-DX1.1BF3077E-910F-4992-AD46-B6869A136E98",
+  "TCGA-25-1878-01Z-00-DX1.618F8128-41C4-411B-9B26-B490E066B30D",
+  "TCGA-25-2042-01Z-00-DX1.79198B62-0E0B-46C4-8D35-FE20582B8035",
+  "TCGA-25-2390-01Z-00-DX1.BC83304E-747C-47EC-BD80-BA0B322C8630",
+  "TCGA-25-2391-01Z-00-DX1.3930615C-785B-48D4-BD69-FD87932A518A",
+  "TCGA-25-2392-01Z-00-DX1.C37932E5-973F-444D-8CEB-1BED4279165E",
+  "TCGA-25-2393-01Z-00-DX1.A311D005-D661-4851-A54F-EE3310C9CD8A",
+  "TCGA-25-2396-01Z-00-DX1.3E755B49-EFC5-49B8-A381-0B06DAE56961",
+  "TCGA-25-2397-01Z-00-DX1.B6FDE9A3-6A51-4A79-82CB-51ED37945A54",
+  "TCGA-25-2398-01Z-00-DX1.3F0E9A15-DBC8-43A0-8C94-20B02757CD10",
+  "TCGA-25-2399-01Z-00-DX1.B9A34CB0-9EBB-4435-8EDE-E4B9078565B1",
+  "TCGA-25-2400-01Z-00-DX1.AAD20514-6FF7-47A5-89DB-8AA15DCC101B",
+  "TCGA-25-2401-01Z-00-DX1.AEA99982-DB6B-4178-BEDC-6E1F605B8D7C",
+  "TCGA-25-2404-01Z-00-DX1.7193B185-31C3-41D0-9194-86DEDF15F096",
+  "TCGA-25-2409-01Z-00-DX1.34FFD6A9-4919-4DF5-8415-215CC833F12D",
+  "TCGA-3P-A9WA-01Z-00-DX1.A5FDC436-7F0D-4DD2-8644-CEF1BFF9C614",
+  "TCGA-42-2587-01Z-00-DX1.7a887a16-a8bc-403b-ab71-a8b43e5613fc",
+  "TCGA-57-1582-01Z-00-DX1.BDF02DAA-E520-46BD-A479-58CAA4354B1A",
+  "TCGA-57-1583-01Z-00-DX1.88ACB045-1DBD-4F0B-A6D0-53B6C208805C",
+  "TCGA-57-1585-01Z-00-DX1.934E0F30-F804-4CFA-92D5-41576DA6C367",
+  "TCGA-57-1586-01Z-00-DX1.5C85A9B1-9ACC-4D62-BA09-91F8BDB2A058",
+  "TCGA-57-1992-01Z-00-DX1.1022B1ED-3DC1-4F71-8635-0F8B28138B8C",
+  "TCGA-57-1993-01Z-00-DX1.464F641B-AA9F-49A7-A224-88D9847159DF",
+  "TCGA-57-1994-01Z-00-DX1.A0798185-30C5-4C32-B1A8-B440D4F4ED95",
+  "TCGA-59-A5PD-01Z-00-DX1.0A4D38A2-7B15-4550-B00C-4276485A9613",
+  "TCGA-5X-AA5U-01Z-00-DX1.1A03C105-4086-4AAB-B821-A9E8156FA704",
+  "TCGA-OY-A56P-01Z-00-DX1.59CA76B0-5613-48CB-ACE7-6F808B8A9423",
+  "TCGA-WR-A838-01Z-00-DX1.5FE22DE4-CEFB-45F6-9299-505023A8F3BA"
+)
+
+saveRDS(good_sample_names, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/good_samples_name.rds")
+```
+
+# samples extraction - again but without bad samples
+
+```{r}
+ov_meta_matched <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/survival_dataset_&_metadata.rds")
+good_sample_names <- readRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/good_samples_name.rds")
+```
+
+```{r}
+good_sample_names <- good_sample_names |> paste0(".svs")
+
+set.seed(42) 
+
+random_5_per_cluster <- ov_meta_matched |>
+  filter(slide_name %in% good_sample_names) |> 
+  # 1. Keep only unique patients per cluster so we don't sample the same person twice
+  distinct(cluster, patientID) |>
+  # 2. Group by cluster
+  group_by(cluster) |>
+  # 3. Randomly pull exactly 5 rows (if a cluster has fewer than 5, it pulls all of them)
+  slice_sample(n = 5) |>
+  ungroup() |>
+  # Keep just the columns you care about
+  select(cluster, patientID)
+
+# Print the final dataframe
+print(random_5_per_cluster)
+
+# If you need them as a simple flat vector of IDs to use later:
+vector_of_ids <- random_5_per_cluster$patientID
+```
+

@@ -1,0 +1,221 @@
+---
+title: "Windows estimation through intensity of the channels"
+author: "Valerio Reffo"
+date: "2026-02-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta)
+library(purrr)
+library(readxl)
+library(dplyr)
+library(spatialFDA)
+```
+
+
+```{r}
+spe_list <- readRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/spe_list_20slides_TCGA-OV.rds")
+prova <- spe_list$`TCGA-25-1313-01Z-00-DX1.5A2732D5-01D6-4285-9283-1839E1703C27.svs`
+
+pintimg <- shapeIntensityImage(
+    prova,
+    marks = "sample_id",
+    imageCol = "sample_id",
+    imageId = "sample01",
+    markSelect = "sample01"
+)
+```
+
+## Points intensity based window estimation
+```{r}
+win_params_list <- imap(spe_list, \(spe, name) {
+  
+  n <- estimateReconstructionParametersSPE(
+      spe,
+      marks = "type",
+      imageCol = "sample_id",
+      markSelect = NULL,
+      plotHist = TRUE, 
+      nCores = 20
+  )
+  
+  list(thres = mean(n$thres), bndw = mean(n$bndw))
+})
+
+# calculate the observation window based on the density
+win_list <- map2(spe_list, win_params_list, \(spe, win_params) {
+  
+  allStructs <- reconstructShapeDensitySPE(
+      spe,
+      marks = "type",
+      imageCol = "sample_id",
+      markSelect = NULL,
+      bndw = win_params$bndw,
+      thres = win_params$thres,
+      nCores = 20
+  )
+  combined_poly <- sf::st_union(allStructs)
+  window_est <- as.owin(combined_poly)
+  window_est
+})
+
+walk(win_list, plot)
+```
+
+```{r}
+png("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/figures/contorno_brutto.png", width = 800, height = 800, res = 150)
+  
+  # Plot
+plot(win_list$`TCGA-25-1313-01Z-00-DX1.5A2732D5-01D6-4285-9283-1839E1703C27.svs`, main = "contorno brutto")
+  
+  # Save
+dev.off()
+```
+
+
+Stima della banda in alcuni casi buona e in altri na merda
+
+```{r}
+roba <- reconstructShapeDensitySPE(
+      prova,
+      marks = "type",
+      imageCol = "sample_id",
+      markSelect = NULL,
+      bndw = win_params_list$`TCGA-25-1313-01Z-00-DX1.5A2732D5-01D6-4285-9283-1839E1703C27.svs`$bndw*1.2,
+      thres = win_params_list$`TCGA-25-1313-01Z-00-DX1.5A2732D5-01D6-4285-9283-1839E1703C27.svs`$thres*1.2,
+      nCores = 20
+)
+combined_poly <- sf::st_union(roba)
+window_est <- as.owin(combined_poly)
+plot(window_est)
+```
+
+# Riprovo in modo diverso
+
+Possibile soluzione
+
+```{r}
+library(imager)
+library(spatstat.geom)
+library(purrr)
+
+tissue_mask_fun <- function(img_path, debris_size = 500, hole_size = 200)
+{
+  img <- load.image(img_path)
+  gray_img <- grayscale(img)
+  
+  glass_mask <- threshold(gray_img, "auto")
+  tissue_mask <- !glass_mask # Tissue = TRUE, Background/Holes = FALSE
+  
+  # =======================================================
+  # STEP 2: REMOVE TISSUE DEBRIS (Delete small TRUE islands)
+  # =======================================================
+  tissue_components <- label(tissue_mask)
+  tissue_sizes <- table(tissue_components)
+  
+  min_tissue_pixels <- debris_size # Debris smaller than this is deleted
+  
+  # Find IDs of small tissue pieces (ignore "0" which is background)
+  bad_tissue_ids <- names(tissue_sizes)[tissue_sizes < min_tissue_pixels & names(tissue_sizes) != "0"]
+  
+  # Turn them to FALSE (background)
+  tissue_mask[as.vector(tissue_components) %in% as.integer(bad_tissue_ids)] <- FALSE
+  
+  # plot(tissue_mask, main = "Debris Removed (Holes still intact)")
+  
+  # =======================================================
+  # STEP 3: FILL SMALL HOLES (Delete small FALSE islands)
+  # =======================================================
+  # We use !tissue_mask so the algorithm counts the background/holes as the islands!
+  hole_components <- label(!tissue_mask) 
+  hole_sizes <- table(hole_components)
+  
+  # Holes smaller than this number of pixels will be filled. 
+  # Large biological holes will be totally ignored and kept!
+  max_hole_pixels <- hole_size 
+  
+  # Find IDs of small holes (ignore "0" which is now the tissue)
+  small_hole_ids <- names(hole_sizes)[hole_sizes < max_hole_pixels & names(hole_sizes) != "0"]
+  
+  # Turn them to TRUE (tissue)
+  tissue_mask[as.vector(hole_components) %in% as.integer(small_hole_ids)] <- TRUE
+  
+  # plot(tissue_mask, main = "Small Holes Filled (Large holes preserved!)")
+  # =======================================================
+  
+  mask_mat <- tissue_mask[,,1,1]  
+  mask_mat_y_x <- t(mask_mat)                 
+  mask_spatstat <- mask_mat_y_x[nrow(mask_mat_y_x):1, ] 
+  
+  win_thumb <- owin(mask = mask_spatstat)
+  win_thumb
+}
+```
+
+```{r}
+win_prova1 <- tissue_mask_fun("/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/thumb/TCGA-25-1313-01Z-00-DX1.5A2732D5-01D6-4285-9283-1839E1703C27.png", 
+                              debris_size = 500, 
+                              hole_size = 200)
+plot(win_prova1)
+
+win_prova2 <- tissue_mask_fun("/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/thumb/TCGA-23-1028-01Z-00-DX1.117B4B7B-F796-4D33-A645-CD80E5C43E6D.png", 
+                              debris_size = 200, 
+                              hole_size = 100)
+plot(win_prova2)
+```
+
+```{r}
+plotVisium(spe_list$`TCGA-23-1028-01Z-00-DX1.117B4B7B-F796-4D33-A645-CD80E5C43E6D.svs`, spots = FALSE)
+```
+
+```{r}
+win_tentative_list <- imap(spe_list, \(spe, name) {
+
+  base_dir <- "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/thumb"
+  png_name <- sub("\\.svs$", ".png", name)
+  img_file <- file.path(base_dir, png_name)
+  
+  # 4. Pass the dynamic path to your function
+  win_result <- tissue_mask_fun(
+    img_path = img_file, 
+    debris_size = 500, 
+    hole_size = 200
+  )
+  
+  return(win_result)
+})
+walk(win_tentative_list, plot)
+```
+
+
+# Mask from HoverNet 
+
+```{r}
+win_hovernet <- imap(spe_list, \(spe, name) {
+
+  base_dir <- "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/mask"
+  png_name <- sub("\\.svs$", ".png", name)
+  img_file <- file.path(base_dir, png_name)
+  
+  img <- imager::load.image(img_file)
+  
+  return(img)
+})
+walk(win_hovernet, plot)
+```
+
+```{r}
+saveRDS(win_hovernet, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_data/window_masks_HoverNet.rds")
+```
+

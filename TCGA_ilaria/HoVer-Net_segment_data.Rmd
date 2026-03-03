@@ -1,0 +1,531 @@
+---
+title: "Ilaria Data - HoverNet segmentation"
+author: "Valerio Reffo"
+date: "2026-02-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta)
+library(purrr)
+source("~/repositories/spatialPointProcess_clustering/helper_function.R", echo = TRUE)
+```
+
+```{r}
+data_path <- '/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/h5ad/TCGA-WR-A838-01Z-00-DX1.5FE22DE4-CEFB-45F6-9299-505023A8F3BA.h5ad'
+# prova <- read_h5ad(data_path, as = "SingleCellExperiment") perdiamo obsm (coordinate spaziali) quindi convertiamo manualmente
+```
+
+Function to transform anndata to SpatialExperiment
+
+```{r}
+ann2spe <- \(data_path, spat_coords_name = c("x", "y"), img_path = NULL, ...) {
+  ann <- anndataR::read_h5ad(data_path)
+  #object to build SpatialExperiment
+  counts <- t(ann$X) # transpose it
+  cd <- ann$obs
+  meta <- ann$uns
+  spat <- ann$obsm$spatial
+  colnames(spat) <- spat_coords_name
+  cd <- cbind(cd, spat)
+  spe <- SpatialExperiment::SpatialExperiment(assays = base::list("counts" = counts), 
+                                              colData = cd,
+                                              metadata = meta,
+                                              spatialCoordsNames = spat_coords_name,
+                                              imageSources = img_path, ...)
+  spe
+}
+```
+
+```{r}
+spe <- ann2spe(data_path, img_path = "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/thumb/TCGA-WR-A838-01Z-00-DX1.5FE22DE4-CEFB-45F6-9299-505023A8F3BA.png")
+spe
+```
+
+```{r}
+#plotVisium(spe, spots = FALSE)
+```
+
+```{r}
+#plotCoords(spe, annotate = "type", in_tissue = NULL, point_size = 0.1)
+```
+
+```{r}
+plotVisium(spe, spots = FALSE) | 
+  plotCoords(spe, annotate = "type", in_tissue = NULL, point_size = 0.1)
+```
+
+# Window
+
+## ripras
+```{r}
+# 1. Extract the coordinates from your SpatialExperiment object
+coords <- spatialCoords(spe)
+
+window_polygon <- convexhull.xy(x = coords[, "x"], y = coords[, "y"])
+
+plot(window_polygon, main = "Calculated Window Polygon")
+print(window_polygon)
+```
+
+## Points intensity based window estimate
+```{r}
+n <- estimateReconstructionParametersSPE(
+    spe,
+    marks = "type",
+    imageCol = "sample_id",
+    markSelect = NULL,
+    plotHist = TRUE,
+    nCores = 10
+)
+
+thresSPE <- mean(n$thres)
+bndwSPE <- mean(n$bndw)
+
+# calculate the observation window based on the density
+allStructs <- reconstructShapeDensitySPE(
+    spe,
+    marks = "type",
+    imageCol = "sample_id",
+    markSelect = NULL,
+    bndw = bndwSPE,
+    thres = thresSPE,
+    nCores = 10
+)
+```
+
+## ppp object from the window estimated with the intensity of the points
+```{r}
+combined_poly <- sf::st_union(allStructs)
+
+# 2. Convert to owin object
+window_estint <- as.owin(combined_poly)
+ppp_int <- ppp(x = as.vector(coords[,"x"]), y = as.vector(coords[,"y"]), window = window_estint, marks = spe$type)
+```
+
+Almost 10k points were rejected as outside the window
+
+## ppp object from the window estimated as a convex hull
+```{r}
+ppp_obj <- ppp(x = as.vector(coords[,"x"]), y = as.vector(coords[,"y"]), window = window_polygon, marks = spe$type)
+```
+
+No problem here with points outside the window
+
+### grid creation for both the windows
+
+Let's set a grid size so we can have smaller tiles and more local informations. Fixing the size to 2000 pixel and with mpp of 0.25 (i guess) we have tiles of 500 micron 
+
+```{r}
+tiles_creation <- function(window, tile_size = 2000){
+  
+  x_range <- diff(window$xrange)
+  y_range <- diff(window$yrange)
+  
+  nx_calc <- ceiling(x_range / tile_size)
+  ny_calc <- ceiling(y_range / tile_size)
+  
+  grid_rect <- quadrats(window, nx = nx_calc, ny = ny_calc)
+  
+  # 4. Clip to the polygon (Same logic as before)
+  grid_tiles <- tiles(grid_rect)
+  clipped_tiles <- lapply(grid_tiles, function(w) intersect.owin(w, window))
+  
+  # 5. Filter empty tiles and recreate tessellation
+  valid_tiles <- clipped_tiles[sapply(clipped_tiles, function(x) !is.empty(x))]
+  final_tess <- tess(tiles = valid_tiles)
+  final_tess
+}
+```
+
+Intensity estimated
+
+```{r}
+final_tess <- tiles_creation(window_estint, tile_size = 2000)
+
+split_points <- split(ppp_int, f = final_tess)
+# 5. Verify the shape
+# plot(final_tess, main = "Grid clipped to Polygon Shape")
+```
+
+Decide a threshold to remove (almost) empty tiles
+```{r}
+npoints_tess <- map_dbl(split_points, npoints)
+length(npoints_tess)
+summary(npoints_tess)
+```
+
+Cut at the 1st Quartile of the npoints distribution
+```{r}
+ppp_intsub <- split_points[sapply(split_points, npoints) >= 428]
+ppp_intsub
+```
+
+Do the same for the other window 
+```{r}
+grid_tess <- tiles_creation(window_polygon, tile_size = 2000)
+
+# Cut the points into the quadrats
+split_points <- split(ppp_obj, f = grid_tess)
+```
+
+Keep filtering at the first interquantile of before
+```{r}
+# Example: Check how many points are in the first FOV
+npoints_tess <- map_dbl(split_points, npoints)
+length(npoints_tess)
+summary(npoints_tess)
+# filter tess with npoints lower then 10k
+ppp_sub <- split_points[sapply(split_points, npoints) >= 428]
+ppp_sub
+```
+
+Now I have the 2 kind of object - I want to check if the marks are proportional and then keep only the most similar tiles in term of distribution of marks and quantity 
+And save it 
+```{r}
+ppp_all <- list("ppp_estint" = ppp_intsub, "ppp_win" = ppp_sub)
+# 
+saveRDS(ppp_all, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/ppp_list_of_both_ppp.RDS")
+
+ppp_all <- readRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/ppp_list_of_both_ppp.RDS")
+```
+
+
+# Esploratory graphics
+```{r}
+# 1. Create the data frame iterating through the nested lists
+df_counts <- imap_dfr(ppp_all, function(ppp_list, source_name) {
+  
+  # Iterate through the tiles in the current list
+  imap_dfr(ppp_list, function(ppp_obj, tile_name) {
+    
+    # Extract marks and count them
+    marks_vec <- marks(ppp_obj)
+    
+    # Handle cases where a tile might be empty
+    if (npoints(ppp_obj) == 0) {
+      return(tibble(Mark = character(), Count = integer(), Tile = character()))
+    }
+    
+    # Create the summary tibble
+    table(marks_vec) |> 
+      as_tibble() |> 
+      rename(Mark = marks_vec, Count = n) |> 
+      mutate(Tile = tile_name)
+      
+  }) |> 
+    mutate(Source = source_name) # Add the top-level list name (ppp_estint, ppp_win)
+})
+
+# 2. Plot the results
+ggplot(df_counts, aes(x = Tile, y = Count, fill = Mark)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~Source, ncol = 1, scales = "free_y") + # Separate plots for each source
+  theme_minimal() +
+  labs(
+    title = "Point Counts per Mark by Tile and Source",
+    x = "Tile ID",
+    y = "Number of Points"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+# 3. Plot proportions using position = "fill"
+ggplot(df_counts, aes(x = Tile, y = Count, fill = Mark)) +
+  geom_bar(stat = "identity", position = "fill") + 
+  scale_y_continuous(labels = scales::percent) + # Converts y-axis to %
+  facet_wrap(~Source, ncol = 1, scales = "free_y") + # Separate plots for each source
+  theme_minimal() +
+  labs(title = "Proportion of Marks per Tile",
+       x = "Tile",
+       y = "Proportion",
+       fill = "Mark Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# 2. Iterate through the top-level list (estint vs win)
+# iwalk(ppp_all, function(ppp_list, source_name) {
+# 
+#   # Create a specific sub-folder for this source (e.g., plots/ppp_estint)
+#   save_dir <- file.path("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/figures/spatial_plots", source_name)
+#   dir.create(save_dir, showWarnings = FALSE)
+#   
+#   # 3. Iterate through the tiles within this source
+#   iwalk(ppp_list, function(current_ppp, tile_name) {
+#     
+#     # Extract data
+#     df_points <- as.data.frame(current_ppp)
+#     
+#     # Generate the plot
+#     p <- ggplot(df_points, aes(x = x, y = y, color = marks)) +
+#       geom_point(size = 0.05, alpha = 0.6) + 
+#       coord_fixed() + 
+#       theme_minimal() +
+#       labs(title = paste(source_name, "-", tile_name)) + # Add source to title
+#       theme(
+#         axis.text = element_blank(),
+#         axis.ticks = element_blank(),
+#         axis.title = element_blank(),
+#         panel.grid = element_blank()
+#       ) + 
+#       guides(color = guide_legend(override.aes = list(size = 5, alpha = 1)))
+#     
+#     # 4. Construct filename and Save
+#     # Sanitizing filename to remove potential illegal characters
+#     safe_tile_name <- gsub("[^[:alnum:]]", "_", tile_name) 
+#     file_path <- file.path(save_dir, paste0(safe_tile_name, ".png"))
+#     
+#     ggsave(filename = file_path, plot = p, width = 12, height = 12, dpi = 400)
+#     
+#     message(paste("Saved:", file_path))
+#   })
+# })
+```
+
+Now i need to filter the tiles and keep the most similar in term of quantity of marks
+I'm interested in the neoplastic and stromal for now.
+```{r}
+tile_ratios <- df_counts |>
+  # Keep only the relevant marks
+  filter(Mark %in% c("neoplastic", "stromal")) |>
+  
+  # Pivot to have columns: neoplastic, stromal
+  tidyr::pivot_wider(names_from = Mark, values_from = Count, values_fill = 0) |>
+  
+  # Calculate the proportion of neoplastic cells (0 to 1)
+  # This normalizes the data so 100k:1k is treated the same as 100:1
+  mutate(
+    neo_stroma_prop = neoplastic / stromal,
+  ) #|>
+  
+  # Filter out empty or very sparse tiles to avoid division by zero errors
+  #filter(Total > 10) 
+
+# 2. Determine the "Target" Proportion
+# You can pick the Median of your dataset, or a specific number (e.g., 0.90)
+target_prop <- median(tile_ratios$neo_stroma_prop, na.rm = TRUE)
+tolerance <- 0.2 # How much deviation is allowed? (e.g., +/- 5%)
+
+cat("Target neoplastic stromal Proportion:", round(target_prop, 3), "\n")
+cat("Range:", round(target_prop - tolerance, 3), "to", round(target_prop + tolerance, 3), "\n")
+
+# 3. Filter the Tiles
+selected_tiles <- tile_ratios |>
+  filter(
+    neo_stroma_prop >= (target_prop * (1 - tolerance)),
+    neo_stroma_prop <= (target_prop * (1 + tolerance))
+  )
+
+# 4. View the selected tiles
+print(selected_tiles)
+
+# --- OPTIONAL: Visualize the Distribution of Ratios ---
+# This helps you decide if your tolerance is too strict or too loose
+ggplot(tile_ratios, aes(x = neo_stroma_prop)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  geom_vline(xintercept = target_prop, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = c((target_prop * (1 - tolerance)), (target_prop * (1 + tolerance))), color = "red", linetype = "dotted", linewidth = 0.8) +
+  annotate("rect", xmin = (target_prop * (1 - tolerance)), xmax = (target_prop * (1 + tolerance)), 
+           ymin = -Inf, ymax = Inf, fill = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Distribution of Neoplastic/Stromal Ratios",
+       subtitle = paste0("Target (Median): ", round(target_prop, 2), 
+                         " | Accepted Range: ", round((target_prop * (1 - tolerance)), 2), "-", round((target_prop * (1 + tolerance)), 2)),
+       x = "Ratio (Neoplastic / Stromal)",
+       y = "Count of Tiles")
+```
+
+Subset to keep only the 4 tiles for the 2 windows type
+```{r}
+ppp_all_filt <- imap(ppp_all, \(current_ppp_list, source_name){
+  # names of the tiles to keep for each source
+  names_4each_source <- selected_tiles |> 
+    filter(Source == source_name) |> 
+    pull(Tile)
+  # names of the tiles to filter to
+  tiles_to_keep <- intersect(names(current_ppp_list), names_4each_source)
+  return(current_ppp_list[tiles_to_keep])
+})
+
+ppp_all_filt
+
+# 3. Check the results
+# See how many tiles remain in each list
+map(ppp_all_filt, length)
+```
+
+
+# Homogeneus ppp
+
+L function between neoplastic and stromal
+```{r}
+Lcross_homo <- imap(ppp_all_filt, \(current_ppp_list, source_name) {
+  
+  imap(current_ppp_list, \(ppp_obj, tile_name) {
+     # Calculate Lcross
+     L <- Lcross(ppp_obj, i = "neoplastic", j = "stromal", correction = "best")
+     L 
+  }) 
+})
+```
+
+and pair correlation function
+
+```{r}
+pcfcross_homo <- imap(Lcross_homo, \(current_L_list, source_name) {
+  
+  imap(current_L_list, \(Lcross, tile_name) {
+     # Calculate Lcross
+     pcf <- pcf(Lcross, method = "b")
+     pcf
+  }) 
+})
+```
+
+## Plot of the curvers
+
+```{r}
+df_Lcross_homo <- imap_dfr(Lcross_homo, function(tile_list, source_name) {
+  
+  imap_dfr(tile_list, function(L_obj, tile_name) {
+    
+    # Convert fv object to dataframe
+    as.data.frame(L_obj) |> 
+      select(r, theo, matches("iso|trans|border")) |>  # Select r, theo, and the edge correction used
+      rename_with(~"observed", matches("iso|trans|border")) |>  # Rename correction col to 'observed'
+      mutate(
+        Source = source_name,
+        Tile = tile_name,
+        # Calculate L(r) - r (Besag's transformation) for easier interpretation
+        # If L(r) - r > 0 => Clustering (Attraction)
+        # If L(r) - r < 0 => Dispersion (Repulsion)
+        L_centered = observed - r 
+      )
+  })
+})
+```
+
+
+```{r}
+ggplot(df_Lcross_homo, aes(x = r, y = L_centered, group = Tile)) +
+  # Add the theoretical Poisson line (y=0 because we did L(r)-r)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  
+  # Plot all individual tile curves (faintly)
+  geom_line(alpha = 0.3, color = "steelblue") +
+  
+  # Split by Source
+  facet_wrap(~Source) +
+  
+  theme_minimal() +
+  labs(
+    title = "L-cross Function (Besag's L(r) - r)",
+    subtitle = "Positive = Association + , Negative = Association -",
+    x = "Distance (r)",
+    y = "L(r) - r"
+  )
+```
+
+```{r}
+df_pcfcross_homo <- imap_dfr(pcfcross_homo, function(tile_list, source_name) {
+  
+  imap_dfr(tile_list, function(pcf_obj, tile_name) {
+    
+    # Convert fv object to dataframe
+    as.data.frame(pcf_obj) |> 
+      select(r, theo, pcf) |>  # Select r, theo, and the edge correction used
+      mutate(
+        Source = source_name,
+        Tile = tile_name,
+        # Calculate L(r) - r (Besag's transformation) for easier interpretation
+        # If L(r) - r > 0 => Clustering (Attraction)
+        # If L(r) - r < 0 => Dispersion (Repulsion)
+        pcf = pcf
+      )
+  })
+})
+```
+
+```{r}
+ggplot(df_pcfcross_homo, aes(x = r, y = pcf, group = Tile)) +
+  # Add the theoretical Poisson line (y=0 because we did L(r)-r)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  
+  # Plot all individual tile curves (faintly)
+  geom_line(alpha = 0.3, color = "steelblue") +
+  
+  # Split by Source
+  facet_wrap(~Source) +
+  
+  theme_minimal() +
+  labs(
+    title = "L-cross Function (Besag's L(r) - r)",
+    subtitle = "Positive = Association + , Negative = Association -",
+    x = "Distance (r)",
+    y = "L(r) - r"
+  )
+```
+
+```{r}
+library(ggrepel)
+label_data <- df_Lcross_homo %>%
+  group_by(Source, Tile) %>%
+  filter(r == max(r)) %>% # Select the end of the curve
+  ungroup()
+
+# 2. Plot with Colors and Labels
+ggplot(df_Lcross_homo, aes(x = r, y = L_centered, group = Tile, color = Tile)) +
+  
+  # Theoretical Line
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+  
+  # Curves (Colored by Tile)
+  geom_line(alpha = 0.8, linewidth = 0.7) +
+  
+  # Labels at the end of the curves
+  geom_text_repel(
+    data = label_data,
+    aes(label = Tile),
+    size = 3,
+    direction = "y",      # Try to stack them vertically if they overlap
+    segment.size = 0.2,   # Thin lines connecting label to curve
+    nudge_x = 0.1,        # Push labels slightly to the right
+    max.overlaps = 20     # Allow many labels
+  ) +
+  
+  # Split by Source
+  facet_wrap(~Source) +
+  
+  theme_minimal() +
+  labs(
+    title = "L-cross Function (Besag's L(r) - r)",
+    subtitle = "Positive = Attraction, Negative = Repulsion",
+    x = "Distance (r)",
+    y = "L(r) - r"
+  ) +
+  # Hide the legend because the direct labels make it redundant
+  theme(legend.position = "none") 
+```
+
+
+# Intensity estimate for the tiles
+
+I want to estimate intensity based on the 2 marks I'll study, so neoplastic and stromal. And then use it as a proxy to model Ripley K function of an inhomogeneus process with intensity estimate on the 2 marks kernel. I can try to estimate the kernel intensity with different parameters and see what does it change. also maybe Hypotesize different kinds of second-order organization?
+
+
+
+
+
