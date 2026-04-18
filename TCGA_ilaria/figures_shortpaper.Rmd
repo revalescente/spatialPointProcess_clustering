@@ -1,0 +1,310 @@
+---
+title: "Figures for the SIS's short paper"
+author: "Valerio Reffo"
+date: "2026-03-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta)
+library(purrr)
+library(readxl)
+library(dplyr)
+library(spatialFDA)
+library(fda)
+# survival analysis
+library(survival)
+library(survminer)
+
+#palette 
+library(paletteer)
+```
+
+Where to save them
+```{r}
+plot_folder <- "~/repositories/spatialPointProcess_clustering/figures/to_publish"
+```
+
+Data
+```{r}
+spe <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/figures_sample.rds")
+spe$type <- forcats::fct_reorder(spe_type, )
+```
+
+# First figure
+
+Thumbnails of the original image and the ppp
+
+Function for the spatial plot
+```{r}
+spatial_coords_plot <- function(spe, cell_type_key = "type", ...) {
+  # data
+  coords <- spatialCoords(spe)
+  plot_df <- data.frame(
+    x = coords[, 1],
+    y = coords[, 2],
+    cell_type = colData(spe)[[cell_type_key]]
+  )
+  # plot
+  plot <- ggplot(plot_df, aes(x = x, y = y, colour = cell_type)) +
+    geom_point(...) +
+    coord_fixed() +
+    theme_void() +
+    #scale_color_manual(values = color_vector) +
+    labs(color = "Cell types") + # Set the legend title to the column name
+    theme(
+      legend.key.width  = unit(0.5, "lines"),
+      legend.key.height = unit(1, "lines")
+    ) +
+    # This override.aes increases the size of the points inside the legend
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 1)),
+           ) +
+    scale_y_reverse()
+
+  return(plot)
+}
+
+```
+
+Palette candidate
+scale_colour_paletteer_d("tvthemes::CrazyLaceAgate")
+scale_fill_paletteer_d("tvthemes::CrazyLaceAgate")
+
+scale_colour_paletteer_d("feathers::bee_eater")
+#00346EFF, #007CBFFF, #06ABDFFF, #EDD03EFF, #F5A200FF, #6D8600FF, #424D0CFF
+
+```{r}
+color_vec <- c("benign epithelial" = "#00346EFF",
+"inflammatory" = "#6D8600FF",
+"necrotic" = "#F5A200FF",
+"neoplastic" = "#EDD03EFF",
+"no label" = "#D3D3D3FF",
+"stromal" = "#007CBFFF"
+)
+legend_order <- c("stromal", "benign epithelial", "inflammatory", "necrotic", "neoplastic", "no label")
+```
+
+
+```{r}
+p1 <- plotVisium(prova, spots = FALSE)
+p2 <- spatial_coords_plot(prova, size = 0.02, alpha = 0.4) +
+  scale_color_manual(
+    values = color_vec,
+    breaks = legend_order
+  )
+plot1 <- p1 + p2
+
+ggsave(filename = "/figure1.pdf", plot = plot1, path = plot_folder, dpi = 320, width = 10)
+```
+
+
+# Figure 2
+
+2 panels, one with Lcross mean curves for each cluster, one with scores of pc colored by cluster
+
+Data
+```{r}
+Lcross_list <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/Lcross_stromal_benignEpitelial_91_samples.rds")
+Lcross_filtered <- Lcross_list[names(Lcross_list) != "TCGA-23-1121-01Z-00-DX1.E2F25441-32C3-46BF-A845-CB4FA787E8CB"]
+```
+
+```{r}
+Lfun_stroben <- fsmooth(Lcross_filtered, centrata = T)
+```
+
+
+```{r}
+# Creates a named list of mean fd objects
+mean_fd_list <- unique(df_clust_filt$cluster_kmean) |> 
+  set_names(paste0("Cluster_", unique(df_clust_filt$cluster_kmean))) |> 
+  map(\(k) {
+    # Subset the fd object for this specific cluster and calculate the mean
+    mean.fd(Lfun_stroben$fd[which(df_clust_filt$cluster_kmean == k)])
+  })
+
+# Access cluster 1's mean function:
+#plot(mean_fd_list$Cluster_1)
+```
+
+color palette
+```{r}
+color_vec_4 <- c(
+  "Cluster_1" = '#E27B0CFF',
+  "Cluster_2" = '#FED105FF',
+  "Cluster_3" = '#6CA167FF',
+  "Cluster_4" = '#145A76FF'
+)
+
+```
+
+Panel 1
+```{r}
+library(fda)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(ggthemes)
+
+# 1. Define a grid of points to evaluate the functions on.
+# We extract the range directly from the basis of the first mean function
+basis_range <- mean_fd_list[[1]]$basis$rangeval
+eval_grid <- seq(basis_range[1], basis_range[2], length.out = 100)
+
+# 2. Evaluate each mean function and combine into a tidy dataframe
+mean_plot_df <- imap_dfr(mean_fd_list, \(fd_obj, cluster_name) {
+  tibble(
+    r = eval_grid,
+    # eval.fd returns a matrix, we coerce it to a vector
+    value = as.vector(eval.fd(eval_grid, fd_obj)),
+    cluster = cluster_name
+  )
+})
+
+# 3. Plot with ggplot2
+plot2_a <- ggplot(mean_plot_df, aes(x = r, y = value, color = cluster)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") + # Added horizontal line
+  geom_line(linewidth = 1) +
+  #theme_par() +
+  theme_few() +
+  labs(
+    title = "",
+    x = "r (micron)",
+    y = "L(r) - r",
+    color = "Cluster"
+  ) +
+  scale_color_manual(
+    values = color_vec_4
+  )
+plot2_a
+```
+
+panel 2 - scores fPCA
+```{r}
+fpca_plot_df <- tibble(
+  FPC1 = fpca_filt$scores[, 1],
+  FPC2 = fpca_filt$scores[, 2],
+  Cluster = factor(paste0("Cluster_", fpca_km_filt$cluster))
+)
+
+# 3. Create the ggplot
+plot2_b <- ggplot(fpca_plot_df, aes(x = FPC1, y = FPC2, color = Cluster)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey") +
+  geom_point(size = 2.5) + # shape = 3 is the equivalent of pch = 3
+  scale_color_manual(values = color_vec_4) +
+  theme_few() +
+  labs(
+    title = "",
+    x = "fPC 1",
+    y = "fPC 2"
+  )
+```
+
+```{r}
+fig2 <- plot2_a | plot2_b
+
+ggsave(filename = "/figure2.pdf", plot = fig2, path = plot_folder, dpi = 320, width = 20)
+```
+
+Second try for figure 2
+```{r}
+# 1. Define plot2_a
+plot2_a <- ggplot(mean_plot_df, aes(x = r, y = value, color = cluster)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") + 
+  geom_line(linewidth = 1) +
+  theme_few() +
+  labs(
+    title = "",
+    x = "r (micron)",
+    y = "L(r) - r",
+    color = "Cluster"
+  ) +
+  scale_color_manual(values = color_vec_4)
+plot2_a <- plot2_a + theme(legend.position = "none")
+
+# 2. Define plot2_b (Assuming it uses the same structure but different data/metrics)
+plot2_b <- ggplot(fpca_plot_df, aes(x = FPC1, y = FPC2, color = Cluster)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey") +
+  geom_point(size = 2.5) + # shape = 3 is the equivalent of pch = 3
+  scale_color_manual(values = color_vec_4) +
+  theme_few() +
+  labs(
+    title = "",
+    x = "fPC 1",
+    y = "fPC 2"
+  )
+
+# 3. Combine with Patchwork and apply global formatting
+fig2 <- (plot2_a | plot2_b) + 
+  plot_layout(guides = "collect") & # Collects legends into 1 shared legend
+  theme(
+    # Make axis titles and tick texts larger
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text  = element_text(size = 14),
+    
+    # Make legend title and text larger
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text  = element_text(size = 14),
+    
+    # Increase the overall spacing/size of the legend keys
+    legend.key.size = unit(2, "lines") 
+  ) &
+  # Make the actual color keys (lines/balls) inside the legend thicker/larger
+  guides(color = guide_legend(override.aes = list(linewidth = 2, size = 5)))
+
+# Print the final plot
+fig2
+ggsave(filename = "/figure2.pdf", plot = fig2, path = plot_folder, dpi = 320, width = 20)
+
+```
+
+
+# Figures 3
+
+KM survival curves
+```{r}
+color_vec_4b <- c(
+  "cluster_kmean=1" = '#E27B0CFF',
+  "cluster_kmean=2" = '#FED105FF',
+  "cluster_kmean=3" = '#6CA167FF',
+  "cluster_kmean=4" = '#145A76FF'
+)
+
+set.seed(42)
+fit_filt <- survfit(Surv(time, vital_status) ~ cluster_kmean, data = df_combined_filt)
+(fig3 <- ggsurvplot(fit_filt, data = df_combined_filt, 
+                            palette = color_vec_4b, risk.table = TRUE, pval = TRUE, xlim = c(0,3000)))
+```
+
+```{r}
+fig3_better <- fig3$plot / fig3$table  
+
+fig3_final <- fig3_better + 
+  plot_layout(heights = c(3, 1))
+```
+
+```{r}
+
+ggsave(filename = "/figure3.pdf", plot = fig3_final, path = plot_folder, dpi = 300, width = 10, height = 8)
+```
+
+
+
+
+
+
+
+
+
+

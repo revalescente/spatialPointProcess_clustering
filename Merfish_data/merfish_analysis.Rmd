@@ -1,0 +1,692 @@
+---
+title: "merfish analysis"
+author: "Valerio Reffo"
+date: "2026-03-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta)
+library(purrr)
+library(readxl)
+library(dplyr)
+library(spatialFDA)
+library(fda)
+# survival analysis
+library(survival)
+library(survminer)
+
+library(MerfishData)
+```
+
+Merfish dataset
+
+```{r}
+#spe <- MouseColonIbdCadinu2024()
+#saveRDS(spe, file = "~/repositories/spatialPointProcess_clustering/dataset/Merfish_dataset/spatialExp_alldata.rds")
+
+spe <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/Merfish_dataset/spatialExp_alldata.rds")
+```
+
+Rapporto micron per pixel: 1 pixel = 109 nanometri aka 109/1000 = 0.109 
+
+```{r}
+mpp <-  0.109
+```
+
+Per selezionare un campione specifico usare mouse_id e slice_id
+
+```{r}
+table(spe$sample_id)
+table(spe$sample_type)
+table(spe$mouse_id)
+table(spe$mouse_id, spe$slice_id)
+table(spe$slice_id, spe$technical_repeat_number)
+```
+
+
+```{r}
+table(spe$sample_id, spe$slice_id, spe$mouse_id)
+```
+
+
+Identificativo di "campione" per le analisi successive
+```{r}
+spe$unique_id <- paste0(spe$mouse_id, "_", spe$sample_id, "_", spe$slice_id)
+table(spe$unique_id) 
+```
+
+# Exploratory analysis
+
+```{r}
+meta_df <- as.data.frame(colData(spe))
+
+# 2. Split the data frame by unique_id into a named list of data frames
+df_list <- split(meta_df, meta_df$unique_id)
+
+# 3. Use imap to iterate over the list (data) and its names (uid)
+barp_list <- purrr::imap(df_list, \(data, uid) {
+  ggplot(data, aes(x = tier1, fill = tier1)) +
+    geom_bar() +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none"
+    ) +
+    labs(
+      title = "Cell Type (tier1) Distribution",
+      subtitle = paste("Sample:", uid),
+      x = "Tier 1 Cell Type",
+      y = "Number of Cells"
+    )
+})
+walk(barp_list, plot)
+```
+
+
+# Point process objects
+
+Convert to point process class object as list of samples
+```{r}
+save_ppp_from_spe <- function(spe, win_list, 
+                              out_dir = "~/repositories/spatialPointProcess_clustering/dataset/Merfish_dataset/samples_ppp", 
+                              mpp = 0.109, 
+                              mark_col = "tier1") {
+  
+  # 1. Ensure the output directory exists
+  if (!dir.exists(out_dir)) {
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    message(paste("Created directory:", out_dir))
+  }
+  
+  # Get all unique sample IDs from the SpatialExperiment
+  sample_names <- unique(colData(spe)$unique_id)
+  
+  # 2. Iterate over each sample
+  for (sample_name in sample_names) {
+    message(paste("Processing:", sample_name))
+    
+    # 3. Retrieve the matching owin window
+    win_final <- win_list[[sample_name]]
+    
+    # Safety check: does the window exist?
+    if (is.null(win_final)) {
+      warning(paste("No owin object found in windows_list for", sample_name, "- skipping."))
+      next
+    }
+    
+    # 4. Subset the SpatialExperiment for the current sample
+    spe_sub <- spe[, colData(spe)$unique_id == sample_name]
+    
+    # Extract spatial coordinates
+    coords <- spatialCoords(spe_sub)
+    
+    # Extract marks (e.g., cell types). Check if the column exists first.
+    if (!mark_col %in% colnames(colData(spe_sub))) {
+      warning(paste("Column", mark_col, "not found in colData. Creating unmarked ppp."))
+      marks_factor <- NULL
+    } else {
+      marks_factor <- as.factor(colData(spe_sub)[[mark_col]])
+    }
+    
+    # 5. Build the PPP object
+    # spatstat will automatically drop points that fall outside the owin boundaries 
+    # and throw a safe warning if it happens.
+    my_ppp <- tryCatch({
+      ppp(
+        x = coords[, 1], 
+        y = coords[, 2], 
+        window = win_final,
+        marks = marks_factor
+      )
+    }, error = function(e) {
+      warning(paste("Error creating ppp for", sample_name, ":", e$message))
+      return(NULL)
+    })
+    
+    if (is.null(my_ppp)) next
+    
+    # 6. Rescale to microns
+    if (is.na(mpp) || mpp == 1) {
+      warning(paste("No valid MPP provided for", sample_name, "- leaving in pixels"))
+      ppp_microns <- my_ppp
+    } else {
+      # In spatstat, 's' is the length of 1 new unit (micron) in old units (pixels).
+      # If 1 pixel = 0.109 microns, then 1 micron = 1/0.109 pixels.
+      ppp_microns <- rescale(my_ppp, s = 1/mpp, unitname = c("micron", "microns"))
+    }
+    
+    # 7. Save the individual object to the specified directory
+    file_path <- file.path(out_dir, paste0(sample_name, ".rds"))
+    saveRDS(ppp_microns, file = file_path)
+    
+    message(paste("Saved successfully:", file_path))
+  }
+  
+  message("All samples processed.")
+}
+
+# Example usage:
+# save_ppp_from_spe(spe = spe,
+#                   win_list = windows_list,
+#                   mpp = 0.109,
+#                   mark_col = "tier1") # change "type" to whatever your cell type column is named
+```
+
+```{r}
+# input_dir <- "~/repositories/spatialPointProcess_clustering/dataset/Merfish_dataset/samples_ppp" # Change this to your actual folder path
+# file_paths <- list.files(path = input_dir, pattern = "\\.rds$", full.names = TRUE)
+# 
+# ppp_list <- map(file_paths, readRDS)
+# names(ppp_list) <- tools::file_path_sans_ext(basename(file_paths))
+
+#saveRDS(ppp_list, file = "~/repositories/spatialPointProcess_clustering/dataset/Merfish_dataset/ppp_list_allsamples.rds")
+ppp_list <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/Merfish_dataset/ppp_list_allsamples.rds")
+```
+
+Plot of the points inside and outside the masks
+
+Plot to check if the mask is correct and the points are inside
+```{r}
+poinside_plot <- \(ppp, name){
+  ggplot() +
+    # 1. Plot the tissue mask (Extracts pixels on the fly)
+    geom_raster(data = as.data.frame(Window(ppp)),
+                aes(x = x, y = y), fill = "grey80") +
+
+    # 2. Plot the valid cells (Extracts coordinates on the fly)
+    geom_point(data = as.data.frame(ppp),
+               aes(x = x, y = y, color = marks), size = 0.1, alpha = 0.5) +
+
+    # Force standard Cartesian proportions so the image isn't squished
+    coord_fixed() +
+    theme_minimal() +
+    labs(
+      title = "Cell Alignment Check",
+      subtitle = "Grey: Tissue Mask | Blue: Valid Cells | Red: Rejected Cells",
+      x = "X Coordinate",
+      y = "Y Coordinate"
+    )
+}
+map(ppp_list, poinside_plot)
+```
+
+Solo fibroblasti e epiteliali
+```{r}
+poinside_plot <- \(ppp, name){
+  
+  # Extract the points and filter for only Fibroblast and Epithelial
+  cell_data <- as.data.frame(ppp) |> 
+    dplyr::filter(marks %in% c("Fibroblast", "Epithelial"))
+  
+  ggplot() +
+    # 1. Plot the tissue mask
+    geom_raster(data = as.data.frame(Window(ppp)),
+                aes(x = x, y = y), fill = "grey80") +
+
+    # 2. Plot ONLY the filtered valid cells
+    geom_point(data = cell_data,
+               aes(x = x, y = y, color = marks), size = 0.1, alpha = 0.7) +
+
+    # 3. Define specific colors for your cell types
+    scale_color_manual(values = c("Fibroblast" = "blue", "Epithelial" = "red")) +
+
+    # Force standard Cartesian proportions so the image isn't squished
+    coord_fixed() +
+    theme_minimal() +
+    labs(
+      title = paste("Filtered Cells:", name), # Uses the list name
+      subtitle = "Grey: Tissue Mask | Blue: Fibroblast | Red: Epithelial",
+      x = "X Coordinate",
+      y = "Y Coordinate",
+      color = "Cell Type"
+    )
+}
+
+# Use imap instead of map so 'name' gets passed correctly
+filtered_plots <- imap(ppp_list, poinside_plot)
+filtered_plots
+```
+
+
+# Second order statistic analysis
+
+# Homogeneus ppp
+
+## Lfunction estimate
+
+Between Fibroblast and Epithelial
+```{r}
+Lcross_FibEp <- map(ppp_list, \(ppp_obj) {
+     # Calculate Lcross
+     L <- Lcross(ppp_obj, i = "Fibroblast", j = "Epithelial", correction = "border", rmax = 12)
+     L
+})
+```
+
+Check for NA
+```{r}
+na_summary_per_sample <- imap_dfr(Lcross_FibEp, \(fv_obj, sample_name) {
+  
+  # Handle cases where the Lcross calculation returned NULL
+  if (is.null(fv_obj)) {
+    return(tibble(
+      sample = sample_name,
+      r_na = NA_integer_,
+      theo_na = NA_integer_,
+      border_na = NA_integer_,
+      status = "Skipped (NULL)"
+    ))
+  }
+  
+  # Convert the fv object to a standard dataframe
+  df <- as.data.frame(fv_obj)
+  
+  # Count NAs for each specific column
+  tibble(
+    sample = sample_name,
+    r_na = sum(is.na(df$r)),
+    theo_na = sum(is.na(df$theo)),
+    border_na = sum(is.na(df$border)),
+    status = "Computed"
+  )
+})
+
+# View the per-sample breakdown
+print(na_summary_per_sample)
+
+# 2. Count NAs for EVERYTHING (Grand Totals)
+grand_totals <- na_summary_per_sample |> 
+  summarise(
+    total_r_NAs = sum(r_na, na.rm = TRUE),
+    total_theo_NAs = sum(theo_na, na.rm = TRUE),
+    total_border_NAs = sum(border_na, na.rm = TRUE),
+    total_failed_samples = sum(status == "Skipped (NULL)")
+  )
+
+# View the total counts
+print(grand_totals)
+```
+
+## Plot of the Lcross curves
+
+```{r}
+plot_fv_list <- function(list_of_funcs, spe, correction = "border") {
+  
+  # 1. Extract unique mapping of unique_id to sample_type from the SPE object
+  meta_map <- as.data.frame(colData(spe)) |> 
+    dplyr::select(unique_id, sample_type) |> 
+    dplyr::distinct()
+  
+  # 2. Run the map_dfr block dynamically on whatever list you provide
+  df_lcross <- map_dfr(names(list_of_funcs), function(slide_name) {
+    
+    # Extract the specific L-function object from the provided list
+    L_obj <- list_of_funcs[[slide_name]]
+    
+    as.data.frame(L_obj) |> 
+      mutate(
+        Slide = slide_name,
+        # Use .data[[correction]] to dynamically grab the 'border' column (or 'iso', etc.)
+        L_r_minus_r = .data[[correction]] - r,  
+        
+        # Extract the marks names exactly as you designed
+        mark_i = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][1]),
+        mark_j = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][2])
+      )
+  })
+  
+  # 3. Join the sample_type metadata to our plot dataframe
+  df_lcross <- df_lcross |> 
+    left_join(meta_map, by = c("Slide" = "unique_id"))
+  
+  # 4. Plot with color mapped to sample_type
+  p <- ggplot(df_lcross, aes(x = r, y = L_r_minus_r, group = Slide, color = sample_type)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(alpha = 0.7, linewidth = 0.6) + 
+    theme_minimal() +
+    labs(
+      title = paste0("L-cross Function: ", df_lcross$mark_i[1], " vs ", df_lcross$mark_j[1]),
+      subtitle = "Centered L-function (L(r) - r). Positive = Attraction, Negative = Repulsion",
+      x = "Radius (r)",
+      y = "L(r) - r",
+      color = "Sample Type"
+    ) +
+    theme(legend.position = "right")
+  
+  return(p)
+}
+```
+
+
+```{r}
+(plotEp12 <- plot_fv_list(list_of_funcs = Lcross_FibEp, spe = spe, correction = "border"))
+```
+
+```{r}
+fsmooth <- function(fcross_list, fun, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+  # 1. Calculate raw L-functions
+  r <- fcross_list[[1]]$r
+  mat_fun <- sapply(fcross_list, function(x) x$border)
+  
+  # Ensure column names exist
+  if(is.null(colnames(mat_fun))) colnames(mat_fun) <- names(fcross_list)
+
+  # --- FIX: HANDLE NAs BEFORE SMOOTHING ---
+  for(i in 1:ncol(mat_fun)) {
+    # If the ENTIRE curve is NaN (because a cell type was missing)
+    if(all(is.na(mat_fun[, i]) | is.nan(mat_fun[, i]))) {
+      mat_fun[, i] <- r # We set it to 'r' so it centers to 0 later
+    } 
+    # If only PART of the curve is NA, we interpolate the missing points
+    else if(any(is.na(mat_fun[, i]) | is.nan(mat_fun[, i]))) {
+      # Approximates the missing points based on surrounding points
+      mat_fun[, i] <- zoo::na.approx(mat_fun[, i], na.rm = FALSE, rule = 2)
+    }
+  }
+  # ----------------------------------------
+
+  # 2. Apply centering
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  # NOW it will just smooth perfectly
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", max(r), "micron)")
+  fdnames <- list(fdn_dist,
+                  "Sample" = colnames(mat_fun),
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+
+# Run your smoothing
+Lfun_FibEp <- fsmooth(Lcross_FibEp, centrata = T)
+
+# Now it will plot without crashing
+plot(Lfun_FibEp$fd)
+```
+
+
+```{r}
+plot(Lfun_FibEp$fd)
+lines(c(0,100), c(0,0), col = "gold", lwd = 2)
+```
+
+### Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca <- pca.fd(Lfun_FibEp$fd, nharm = 4, Lfun_FibEp$fdPar)
+rownames(fpca$scores) <- names(Lcross_FibEp) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca)
+```
+
+```{r}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gerarchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 4)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 4)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+table(kmean = fpca_km$cluster)
+table(ward.d2 = memb)
+```
+
+```{r}
+plot(fpca$scores[,1], fpca$scores[,2], col = fpca_km$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,2], col = memb, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+## Check if there is correspondence between sample_type (weeks of patology) and clusters
+```{r}
+colData(spe)$fpca_cluster <- as.factor(fpca_km$cluster[colData(spe)$unique_id])
+
+# Check to make sure it worked
+table(colData(spe)$fpca_cluster, useNA = "ifany", spe$sample_type)
+```
+
+```{r}
+sample_summary <- as.data.frame(colData(spe)) |>
+  dplyr::select(unique_id, sample_type, fpca_cluster) |>
+  dplyr::distinct()
+
+# 2. Create a Cross-Tabulation (Contingency Table)
+# This will show you exactly how many samples of each type fall into each cluster
+cat_table <- table(sample_summary$sample_type, sample_summary$fpca_cluster)
+print("Count of samples per Sample Type and Cluster:")
+print(cat_table)
+```
+
+
+
+
+# Between Fibroblast and Immune
+
+```{r}
+Lcross_FibImm <- map(ppp_list, \(ppp_obj) {
+     # Calculate Lcross
+     L <- Lcross(ppp_obj, i = "Fibroblast", j = "Immune", correction = "border", rmax = 12)
+     L
+})
+```
+
+Check for NA
+```{r}
+na_summary_per_sample <- imap_dfr(Lcross_FibEp, \(fv_obj, sample_name) {
+  
+  # Handle cases where the Lcross calculation returned NULL
+  if (is.null(fv_obj)) {
+    return(tibble(
+      sample = sample_name,
+      r_na = NA_integer_,
+      theo_na = NA_integer_,
+      border_na = NA_integer_,
+      status = "Skipped (NULL)"
+    ))
+  }
+  
+  # Convert the fv object to a standard dataframe
+  df <- as.data.frame(fv_obj)
+  
+  # Count NAs for each specific column
+  tibble(
+    sample = sample_name,
+    r_na = sum(is.na(df$r)),
+    theo_na = sum(is.na(df$theo)),
+    border_na = sum(is.na(df$border)),
+    status = "Computed"
+  )
+})
+
+# View the per-sample breakdown
+print(na_summary_per_sample)
+
+# 2. Count NAs for EVERYTHING (Grand Totals)
+grand_totals <- na_summary_per_sample |> 
+  summarise(
+    total_r_NAs = sum(r_na, na.rm = TRUE),
+    total_theo_NAs = sum(theo_na, na.rm = TRUE),
+    total_border_NAs = sum(border_na, na.rm = TRUE),
+    total_failed_samples = sum(status == "Skipped (NULL)")
+  )
+
+# View the total counts
+print(grand_totals)
+```
+
+## Plot of the Lcross curves
+
+```{r}
+(plot2 <- plot_fv_list(list_of_funcs = Lcross_FibImm, spe = spe, correction = "border"))
+```
+
+```{r}
+fsmooth <- function(fcross_list, fun, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+  # 1. Calculate raw L-functions
+  r <- fcross_list[[1]]$r
+  mat_fun <- sapply(fcross_list, function(x) x$border)
+  
+  # Ensure column names exist
+  if(is.null(colnames(mat_fun))) colnames(mat_fun) <- names(fcross_list)
+
+  # --- FIX: HANDLE NAs BEFORE SMOOTHING ---
+  for(i in 1:ncol(mat_fun)) {
+    # If the ENTIRE curve is NaN (because a cell type was missing)
+    if(all(is.na(mat_fun[, i]) | is.nan(mat_fun[, i]))) {
+      mat_fun[, i] <- r # We set it to 'r' so it centers to 0 later
+    } 
+    # If only PART of the curve is NA, we interpolate the missing points
+    else if(any(is.na(mat_fun[, i]) | is.nan(mat_fun[, i]))) {
+      # Approximates the missing points based on surrounding points
+      mat_fun[, i] <- zoo::na.approx(mat_fun[, i], na.rm = FALSE, rule = 2)
+    }
+  }
+  # ----------------------------------------
+
+  # 2. Apply centering
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  # NOW it will just smooth perfectly
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", max(r), "micron)")
+  fdnames <- list(fdn_dist,
+                  "Sample" = colnames(mat_fun),
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+
+# Run your smoothing
+Lfun_FibEp <- fsmooth(Lcross_FibEp, centrata = T)
+
+# Now it will plot without crashing
+plot(Lfun_FibEp$fd)
+```
+
+```{r}
+Lfun_FibImm <- fsmooth(Lcross_FibImm, centrata = T)
+```
+
+```{r}
+plot(Lfun_FibImm$fd)
+lines(c(0,100), c(0,0), col = "gold", lwd = 2)
+```
+
+### Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca_2 <- pca.fd(Lfun_FibImm$fd, nharm = 4, Lfun_FibImm$fdPar)
+rownames(fpca_2$scores) <- names(Lcross_FibImm) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca_2)
+```
+
+```{r}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gerarchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca_2$scores[,c(1,4)], 4)
+fpca_hc <- hclust(dist(fpca_2$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 4)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+table(kmean = fpca_km$cluster)
+table(ward.d2 = memb)
+```
+
+```{r}
+plot(fpca_2$scores[,1], fpca_2$scores[,2], col = fpca_km$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca_2$scores[,1], fpca_2$scores[,2], col = memb, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+## Check if there is correspondence between sample_type (weeks of patology) and clusters
+```{r}
+colData(spe)$fpca_cluster2 <- as.factor(fpca_km$cluster[colData(spe)$unique_id])
+
+# Check to make sure it worked
+table(colData(spe)$fpca_cluster2, useNA = "ifany", spe$sample_type)
+```
+
+```{r}
+sample_summary <- as.data.frame(colData(spe)) |>
+  dplyr::select(unique_id, sample_type, fpca_cluster2) |>
+  dplyr::distinct()
+
+# 2. Create a Cross-Tabulation (Contingency Table)
+# This will show you exactly how many samples of each type fall into each cluster
+cat_table <- table(sample_summary$sample_type, sample_summary$fpca_cluster2)
+print("Count of samples per Sample Type and Cluster:")
+print(cat_table)
+```

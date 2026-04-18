@@ -1,0 +1,72 @@
+---
+title: "Different fPCA methods"
+author: "Valerio Reffo"
+date: "2026-03-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(fdapace)
+library(SpatialExperiment)
+library(spatstat)
+library(dplyr)
+library(purrr)
+```
+
+# Creation of the FPCA inputs object 
+
+I need a vector with r values, the matrix of values of Lcross for each patient, and a patientID vector
+```{r}
+# 1. Iterate through the list and combine
+df_long <- imap_dfr(Lcross_benign, function(obj, name) {
+  
+  # Coerce the 'fv' object to a standard data.frame
+  df <- as.data.frame(obj)
+  
+  # Select columns and return
+  data.frame(
+    r = df$r,
+    border = df$border - df$r,
+    patientID = substr(name, 1, 12) # Extract TCGA-XX-XXXX
+  )
+})
+
+# View the result
+head(df_long)
+
+pace_input <- MakeFPCAInputs(IDs = df_long$patientID, tVec = df_long$r, yVec = df_long$border)
+```
+
+
+```{r}
+fpcaObj_benign <- FPCA(pace_input$Ly, pace_input$Lt, list(plot = TRUE, methodMuCovEst = 'smooth', userBwCov = 10))
+```
+
+Inspection of the 2 PC
+
+```{r}
+require('ks')
+
+CreatePathPlot(fpcaObj_benign, K = 1, main = 'K = 1', pch = 4); grid()
+CreatePathPlot(fpcaObj_benign, K = 2, main = 'K = 2', pch = 4) ; grid()
+```
+
+Outlier detection??
+
+```{r}
+
+CreateOutliersPlot(fpcaObj_benign, optns = list(K = 2, variant = 'KDE'))
+CreateFuncBoxPlot(fpcaObj_benign, xlab = 'r', ylab = 'Lcross', optns = list(K =2, variant='bagplot'))
+```
+
+Rate of change of this function can be of interest in FDA - tangentially the derivative of Kcross (of which Lcross is a function sqrt(Kcross/r)) is a function of interest itself, the pair correlation function
+```{r}
+
+CreatePathPlot(fpcaObj_benign, K = 2, main = 'K = 2', showObs = FALSE) ; grid()
+CreatePathPlot(fpcaObj_benign, K = 1, main = 'K = 1', showObs = FALSE, derOptns = list(p = 1, bw = 1.01 , kernelType = 'epan'), ylim = c(-1000, 1000) ) ; grid()
+```
+

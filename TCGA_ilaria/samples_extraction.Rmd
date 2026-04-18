@@ -130,19 +130,6 @@ plot(
 grid(col = "lightgray", lty = "dotted")
 ```
 
-```{r}
-highest_pc1 <- rownames(pc_scores)[order(pc_scores$PC1, decreasing = TRUE)[1:2]]
-
-# 2 samples with the LOWEST PC1
-lowest_pc1 <- rownames(pc_scores)[order(pc_scores$PC1, decreasing = FALSE)[1:2]]
-
-# 2 samples with the LOWEST PC2
-lowest_pc2 <- rownames(pc_scores)[order(pc_scores$PC2, decreasing = FALSE)[1:2]]
-
-# Combine them into a final list of 6 sample names
-(selected_samples <- c(highest_pc1, lowest_pc1, lowest_pc2))
-```
-
 # t-SNE
 
 ```{r}
@@ -243,6 +230,14 @@ ggplot(plot_data, aes(x = PC1, y = PC2, color = Cluster)) +
     plot.title = element_text(face = "bold", hjust = 0.5)
   )
 ```
+```{r}
+head(plot_data)
+which.min(plot_data$PC1)
+which.max(plot_data$PC1)
+which.max(plot_data$PC2)
+which.min(plot_data$PC2)
+
+```
 
 
 # Survival analysis
@@ -312,7 +307,7 @@ ov_df <- data.frame(
 
 # 3. Merge the cluster data with the metadata
 # This will automatically duplicate the metadata rows for patients with multiple slides!
-ov_meta_matched <- ov_df %>%
+ov_meta_matched <- ov_df |> 
   left_join(ov_meta_select, by = "patientID")
 
 # 4. Optional: Set the row names of the new dataframe to the slide names
@@ -544,16 +539,16 @@ good_sample_names <- good_sample_names |> paste0(".svs")
 set.seed(42) 
 
 random_5_per_cluster <- ov_meta_matched |>
-  filter(slide_name %in% good_sample_names) |> 
+  dplyr::filter(slide_name %in% good_sample_names) |> 
   # 1. Keep only unique patients per cluster so we don't sample the same person twice
-  distinct(cluster, patientID) |>
+  dplyr::distinct(cluster, patientID) |>
   # 2. Group by cluster
-  group_by(cluster) |>
+  dplyr::group_by(cluster) |>
   # 3. Randomly pull exactly 5 rows (if a cluster has fewer than 5, it pulls all of them)
-  slice_sample(n = 5) |>
-  ungroup() |>
+  dplyr::slice_sample(n = 5) |>
+  dplyr::ungroup() |>
   # Keep just the columns you care about
-  select(cluster, patientID)
+  dplyr::select(cluster, patientID)
 
 # Print the final dataframe
 print(random_5_per_cluster)

@@ -1,0 +1,323 @@
+---
+title: "Pair Correlation function for TCGA data"
+author: "Valerio Reffo"
+date: "2026-03-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta)
+library(purrr)
+library(readxl)
+library(dplyr)
+library(spatialFDA)
+library(fda)
+```
+
+Function to estimate Lcross function for homogeneus point pattern between 2 marks and with downsample
+```{r}
+pcfcross_personal <- function(ppp_obj, mark_i, mark_j, downsample = TRUE, n_down = 10000, ...) {
+  
+  # 1. Get the indices of the specific cell types dynamically
+  idx_i <- which(marks(ppp_obj) == mark_i)
+  idx_j <- which(marks(ppp_obj) == mark_j)
+  
+  # Safety check: ensure both cell types actually exist in the image!
+  if(length(idx_i) < 2 | length(idx_j) < 2) {
+    warning(paste("Not enough points for", mark_i, "and/or", mark_j, "to compute Lcross. Returning NULL."))
+    return(NULL)
+  }
+
+  # 2. Handle Downsampling
+  if (downsample) {
+    # Randomly sample a maximum of n_down cells of each type
+    keep_i <- sample(idx_i, min(length(idx_i), n_down))
+    keep_j <- sample(idx_j, min(length(idx_j), n_down))
+    
+    # Subset the ppp object
+    ppp_sub <- ppp_obj[c(keep_i, keep_j)]
+    
+  } else {
+    # Even if we don't downsample, subsetting to JUST the two marks of interest 
+    # saves a massive amount of memory for spatstat calculation
+    ppp_sub <- ppp_obj[c(idx_i, idx_j)]
+  }
+
+  # 3. Estimate of bw with bw.diggle (likelihood estimate)
+  sigma_val <- bw.diggle(ppp_sub)
+  # 4. Calculate pcfcross dynamically using the provided mark names, 
+  #    preferred divisor = "d" 
+  pcf <- pcfcross(ppp_sub, 
+              i = mark_i, 
+              j = mark_j, 
+              bw = sigma_val, ...)
+  
+  return(pcf)
+}
+```
+
+
+```{r}
+
+r_values <- seq(0, 100, length.out = 40)
+
+pcfcross_benign <- map(ppp_list, \(ppp_obj) {
+  pcfcross_personal(ppp_obj, mark_i = "neoplastic", mark_j = "benign epithelial", 
+                  downsample = TRUE, n_down = 50000, correction = "translate",
+                  kernel = "epanechnikov", divisor = "d", rmax = 100)
+})
+
+Lcross_stroma <- map(ppp_list, \(ppp_obj) {
+  Lcross_personal(ppp_obj, mark_i = "neoplastic", mark_j = "stromal", 
+                  downsample = TRUE, n_down = 50000, rmax = 100, correction = "border", r = r_values)
+})
+```
+
+```{r}
+walk(pcfcross_benign, \(pcf) {plot(pcf, xlim = c(0, 1000))})
+```
+
+
+
+Plot the results
+```{r}
+plot_fv_list <- function(list_of_funcs, correction = "border") {
+  
+  # 1. Run the map_dfr block dynamically on whatever list you provide
+  df_lcross <- map_dfr(names(list_of_funcs), function(slide_name) {
+    
+    # Extract the specific L-function object from the provided list
+    L_obj <- list_of_funcs[[slide_name]]
+    
+    as.data.frame(L_obj) |> 
+      mutate(
+        Slide = slide_name,
+        
+        # Use .data[[correction]] to dynamically grab the 'border' column (or 'iso', etc.)
+        L_r = .data[[correction]],  
+        
+        # Extract the marks names exactly as you designed
+        mark_i = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][1]),
+        mark_j = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][2])
+      )
+  }, .id = "sample_ID")
+  
+  # 2. Build the ggplot
+  p <- ggplot(df_lcross, aes(x = r, y = L_r, group = Slide, color = Slide)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(alpha = 0.7, linewidth = 0.6) + # Using linewidth instead of size for modern ggplot2
+    theme_minimal() +
+    labs(
+      title = paste0("pcf-cross Function: ", df_lcross$mark_i[1], " vs ", df_lcross$mark_j[1]),
+      subtitle = "Centered L-function (L(r) - r). Positive = Attraction, Negative = Repulsion",
+      x = "Radius (r)",
+      y = "pcf(r)",
+      color = "Slide"
+    ) +
+    # Truncate the legend strictly to the first 12 characters (TCGA-XX-XXXX)
+    scale_color_discrete(labels = function(x) substr(x, 1, 12)) +
+    theme(legend.position = "right")
+  
+  return(p)
+}
+```
+
+
+Plot of the lcross functions for neoplastic vs benign epitelial and stromal
+```{r}
+(plcross_nb <- plot_fv_list(Lcross_benign, correction = "trans"))
+(plcross_ns <- plot_fv_list(Lcross_stroma))
+```
+
+# Functional Data Analysis
+
+
+# generic function for smoothing funs
+```{r}
+fsmooth <- function(fcross_list, fun, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- fcross_list[[1]]$r
+  mat_fun <- sapply(fcross_list, function(x) x$border)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", max(r), "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_fun), # Crucial: use names of surviving columns
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+```
+
+
+
+```{r}
+Lfun_benign <- fsmooth(Lcross_benign, centrata = T)
+Lfun_stroma <- fsmooth(Lcross_stroma, centrata = T)
+```
+
+```{r}
+plot(Lfun_benign$fd)
+lines(c(0,350), c(0,0), col = "gold", lwd = 2)
+
+plot(Lfun_stroma$fd)
+lines(c(0,350), c(0,0), col = "gold", lwd = 2)
+```
+
+## Comparison between neoplastic and benign.epithelial
+
+### Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca <- pca.fd(Lfun_benign$fd, nharm = 4, Lfun_benign$fdPar)
+rownames(fpca$scores) <- names(Lcross_benign) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca)
+```
+
+### fPCA plot ruotate per VARIMAX
+
+The plots below show the mean function and the effects of adding (+) and subtracting (−) a
+suitable multiple of the first (resp. second) principal component function.
+
+```{r}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gerarchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 4)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 4)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+plot(dhc, cex = 0.1, horiz = T)
+#ggdendrogram(dhc, rotate = TRUE, size = 2)
+table(kmean = fpca_km$cluster)
+table(ward.d2 = memb)
+```
+
+```{r}
+plot(fpca$scores[,1], fpca$scores[,2], col = fpca_km$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,2], col = memb, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+```{r}
+df_A <- data.frame(
+  patientID = c(
+    "TCGA-OY-A56P", "TCGA-23-1021", "TCGA-23-2072", "TCGA-23-1031", "TCGA-23-1117", # Cluster 1
+    "TCGA-25-2401", "TCGA-25-2399", "TCGA-25-1625", "TCGA-25-1328", "TCGA-25-1871", # Cluster 2
+    "TCGA-25-1315", "TCGA-25-1326", "TCGA-25-2391", "TCGA-25-1635", "TCGA-25-1627", # Cluster 3
+    "TCGA-57-1582", "TCGA-13-A5FU", "TCGA-57-1993", "TCGA-57-1994", "TCGA-57-1583"  # Cluster 4
+  ),
+  cluster_ilaria = c(
+    rep(1, 5), 
+    rep(2, 5), 
+    rep(3, 5), 
+    rep(4, 5)
+  )
+)
+
+# 3. Clean Dataset B to match IDs
+# We extract the first 12 characters (e.g., "TCGA-25-1326")
+df_clust <- data.frame(
+  patientID = substr(names(vec_kmean), 1, 12),
+  cluster_kmean = fpca_km$cluster,
+  cluster_ward = memb
+) |> print()
+
+# 4. Merge to find correspondence
+comparison_benign <- inner_join(df_A, df_clust, by = "patientID") |> 
+  arrange(cluster_kmean, patientID)
+
+# 5. Display the Result
+print(comparison_benign)
+
+table("ilaria_clust" = comparison_benign$cluster_ilaria, "valerio_clust" = comparison_benign$cluster_kmean)
+```
+
+## Comparison between neoplastic and stromal 
+
+### Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca <- pca.fd(Lfun_stroma$fd, nharm = 4, Lfun_stroma$fdPar)
+rownames(fpca$scores) <- names(Lcross_stroma) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca)
+```
+
+### fPCA plot ruotate per VARIMAX
+
+The plots below show the mean function and the effects of adding (+) and subtracting (−) a
+suitable multiple of the first (resp. second) principal component function.
+
+```{r}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gerarchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 4)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 4)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+plot(dhc, cex = 0.1, horiz = T)
+#ggdendrogram(dhc, rotate = TRUE, size = 2)
+table(kmean = fpca_km$cluster)
+table(ward.d2 = memb)
+```

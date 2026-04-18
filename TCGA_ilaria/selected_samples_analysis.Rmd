@@ -21,6 +21,10 @@ library(purrr)
 library(readxl)
 library(dplyr)
 library(spatialFDA)
+library(fda)
+# survival analysis
+library(survival)
+library(survminer)
 ```
 
 Path of the HoverNet data
@@ -59,10 +63,10 @@ metadata <- metadata |>
 # 3. Filter for your 6 samples and extract the Image Name and MPP columns
 # (Note: using backticks because the column name has a space)
 mpp_values <- metadata |> 
-  mutate(patientID = substr(`Image Name`, 1, 12)) |> 
-  filter(patientID %in% vector_of_ids) |> 
-  select(`Image Name`, patientID, MPP) |> 
-  mutate(MPP = as.numeric(MPP))
+  dplyr::mutate(patientID = substr(`Image Name`, 1, 12)) |> 
+  dplyr::filter(patientID %in% vector_of_ids) |> 
+  dplyr::select(`Image Name`, patientID, MPP) |> 
+  dplyr::mutate(MPP = as.numeric(MPP))
 
 # 4. Convert it into a named vector so you can easily use it later
 # (e.g., mpp_vector["TCGA-42-2587...svs"] will return its specific MPP)
@@ -428,6 +432,13 @@ rmax_list <- map(spe_list, \(spe){
 walk(rmax_list, print)
 ```
 
+# Reading saved data
+
+```{r}
+ppp_list <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/ppp_list20slides_TCGA-OV.rds")
+names(ppp_list)
+```
+
 
 
 # Homogeneus ppp
@@ -436,11 +447,11 @@ walk(rmax_list, print)
 
 L function between neoplastic and stromal
 ```{r}
-Lcross_homo <- map(ppp_list, \(ppp_obj) {
-     # Calculate Lcross
-     L <- Lcross(ppp_obj, i = "neoplastic", j = "stromal", correction = "border", rmax = 50)
-     L 
-}) 
+# Lcross_homo <- map(ppp_list, \(ppp_obj) {
+#      # Calculate Lcross
+#      L <- Lcross(ppp_obj, i = "neoplastic", j = "stromal", correction = "border", rmax = 50)
+#      L 
+# }) 
 ```
 
 Downsample to avoid crash
@@ -485,22 +496,26 @@ Lcross_personal <- function(ppp_obj, mark_i, mark_j, downsample = TRUE, n_down =
 
 
 ```{r}
+
+r_values <- seq(0, 100, length.out = 40)
+
 Lcross_benign <- map(ppp_list, \(ppp_obj) {
   Lcross_personal(ppp_obj, mark_i = "neoplastic", mark_j = "benign epithelial", 
-                  downsample = TRUE, n_down = 40000, rmax = 100, correction = "border")
+                  downsample = TRUE, n_down = 50000, rmax = 100, correction = "border", r = r_values)
 })
 
 Lcross_stroma <- map(ppp_list, \(ppp_obj) {
   Lcross_personal(ppp_obj, mark_i = "neoplastic", mark_j = "stromal", 
-                  downsample = TRUE, n_down = 40000, rmax = 100, correction = "border")
+                  downsample = TRUE, n_down = 50000, rmax = 100, correction = "border", r = r_values)
 })
 ```
 
 
 
 Plot the results
+
 ```{r}
-plot_fv_list <- function(list_of_funcs, correction = "border") {
+plot_fv_list <- function(list_of_funcs, comparison_df, correction = "border") {
   
   # 1. Run the map_dfr block dynamically on whatever list you provide
   df_lcross <- map_dfr(names(list_of_funcs), function(slide_name) {
@@ -511,7 +526,6 @@ plot_fv_list <- function(list_of_funcs, correction = "border") {
     as.data.frame(L_obj) |> 
       mutate(
         Slide = slide_name,
-        
         # Use .data[[correction]] to dynamically grab the 'border' column (or 'iso', etc.)
         L_r_minus_r = .data[[correction]] - r,  
         
@@ -519,22 +533,33 @@ plot_fv_list <- function(list_of_funcs, correction = "border") {
         mark_i = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][1]),
         mark_j = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][2])
       )
-  }, .id = "sample_ID")
+  })
   
-  # 2. Build the ggplot
-  p <- ggplot(df_lcross, aes(x = r, y = L_r_minus_r, group = Slide, color = Slide)) +
+  # 2. Join the metadata (comparison_benign) into the dataframe
+  df_lcross <- df_lcross |> 
+    mutate(
+      # Extract the first 12 characters to match "TCGA-XX-XXXX"
+      patientID = substr(Slide, 1, 12)
+    ) |> 
+    # Merge the cluster info based on the patientID
+    left_join(comparison_df, by = "patientID") |> 
+    # Convert cluster_ilaria to a factor so ggplot uses discrete colors instead of a continuous gradient
+    mutate(cluster_ilaria = as.factor(cluster_ilaria))
+  
+  # 3. Build the ggplot
+  # Note: group = Slide ensures each patient gets their own line
+  #       color = cluster_ilaria applies the cluster colors
+  p <- ggplot(df_lcross, aes(x = r, y = L_r_minus_r, group = Slide, color = cluster_ilaria)) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-    geom_line(alpha = 0.7, linewidth = 0.6) + # Using linewidth instead of size for modern ggplot2
+    geom_line(alpha = 0.7, linewidth = 0.6) + 
     theme_minimal() +
     labs(
       title = paste0("L-cross Function: ", df_lcross$mark_i[1], " vs ", df_lcross$mark_j[1]),
       subtitle = "Centered L-function (L(r) - r). Positive = Attraction, Negative = Repulsion",
       x = "Radius (r)",
       y = "L(r) - r",
-      color = "Slide"
+      color = "Cluster" # Renamed legend title
     ) +
-    # Truncate the legend strictly to the first 12 characters (TCGA-XX-XXXX)
-    scale_color_discrete(labels = function(x) substr(x, 1, 12)) +
     theme(legend.position = "right")
   
   return(p)
@@ -542,11 +567,288 @@ plot_fv_list <- function(list_of_funcs, correction = "border") {
 ```
 
 
-Plot of the lcross functions for neoplastic vs benign epitelial and stromal
 ```{r}
-plcross_nb <- plot_fv_list(Lcross_benign)
-plcross_ns <- plot_fv_list(Lcross_stroma)
+plot_colored <- plot_fv_list(
+  list_of_funcs = Lcross_benign, 
+  comparison_df = comparison_benign, 
+  correction = "border"
+)
+plot_colored2 <- plot_fv_list(
+  list_of_funcs = Lcross_stroma, 
+  comparison_df = comparison_stroma, 
+  correction = "border"
+)
+
+plot_colored
+plot_colored2
 ```
 
-I don't see groups of any kind for both the confronts... yikes! 
 
+Plot of the lcross functions for neoplastic vs benign epitelial and stromal
+```{r}
+(plcross_nb <- plot_fv_list(Lcross_benign))
+(plcross_ns <- plot_fv_list(Lcross_stroma))
+```
+
+# Functional Data Analysis
+
+
+# generic function for smoothing funs
+```{r}
+fsmooth <- function(fcross_list, fun, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- fcross_list[[1]]$r
+  mat_fun <- sapply(fcross_list, function(x) x$border)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", max(r), "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_fun), # Crucial: use names of surviving columns
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+```
+
+
+
+```{r}
+Lfun_benign <- fsmooth(Lcross_benign, centrata = T)
+Lfun_stroma <- fsmooth(Lcross_stroma, centrata = T)
+```
+
+```{r}
+plot(Lfun_benign$fd)
+lines(c(0,350), c(0,0), col = "gold", lwd = 2)
+
+plot(Lfun_stroma$fd)
+lines(c(0,350), c(0,0), col = "gold", lwd = 2)
+```
+
+## Comparison between neoplastic and benign.epithelial
+
+### Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca <- pca.fd(Lfun_benign$fd, nharm = 4, Lfun_benign$fdPar)
+rownames(fpca$scores) <- names(Lcross_benign) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca)
+```
+
+### fPCA plot ruotate per VARIMAX
+
+The plots below show the mean function and the effects of adding (+) and subtracting (−) a
+suitable multiple of the first (resp. second) principal component function.
+
+```{r}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gerarchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 4)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 4)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+plot(dhc, cex = 0.1, horiz = T)
+#ggdendrogram(dhc, rotate = TRUE, size = 2)
+table(kmean = fpca_km$cluster)
+table(ward.d2 = memb)
+```
+
+```{r}
+plot(fpca$scores[,1], fpca$scores[,2], col = fpca_km$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,2], col = memb, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+```{r}
+df_A <- data.frame(
+  patientID = c(
+    "TCGA-OY-A56P", "TCGA-23-1021", "TCGA-23-2072", "TCGA-23-1031", "TCGA-23-1117", # Cluster 1
+    "TCGA-25-2401", "TCGA-25-2399", "TCGA-25-1625", "TCGA-25-1328", "TCGA-25-1871", # Cluster 2
+    "TCGA-25-1315", "TCGA-25-1326", "TCGA-25-2391", "TCGA-25-1635", "TCGA-25-1627", # Cluster 3
+    "TCGA-57-1582", "TCGA-13-A5FU", "TCGA-57-1993", "TCGA-57-1994", "TCGA-57-1583"  # Cluster 4
+  ),
+  cluster_ilaria = c(
+    rep(1, 5), 
+    rep(2, 5), 
+    rep(3, 5), 
+    rep(4, 5)
+  )
+)
+
+# 3. Clean Dataset B to match IDs
+# We extract the first 12 characters (e.g., "TCGA-25-1326")
+df_clust <- data.frame(
+  patientID = substr(names(memb), 1, 12),
+  cluster_kmean = fpca_km$cluster,
+  cluster_ward = memb
+) |> print()
+
+# 4. Merge to find correspondence
+comparison_benign <- inner_join(df_A, df_clust, by = "patientID") |> 
+  arrange(cluster_kmean, patientID)
+
+# 5. Display the Result
+print(comparison_benign)
+
+table("ilaria_clust" = comparison_benign$cluster_ilaria, "valerio_clust" = comparison_benign$cluster_kmean)
+```
+
+## Comparison between neoplastic and stromal 
+
+### Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca <- pca.fd(Lfun_stroma$fd, nharm = 4, Lfun_stroma$fdPar)
+rownames(fpca$scores) <- names(Lcross_stroma) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca)
+```
+
+### fPCA plot ruotate per VARIMAX
+
+The plots below show the mean function and the effects of adding (+) and subtracting (−) a
+suitable multiple of the first (resp. second) principal component function.
+
+```{r}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gerarchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 4)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 4)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+plot(dhc, cex = 0.1, horiz = T)
+#ggdendrogram(dhc, rotate = TRUE, size = 2)
+table(kmean = fpca_km$cluster)
+table(ward.d2 = memb)
+```
+
+```{r}
+plot(fpca$scores[,1], fpca$scores[,2], col = fpca_km$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,2], col = memb, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+```{r}
+df_A <- data.frame(
+  patientID = c(
+    "TCGA-OY-A56P", "TCGA-23-1021", "TCGA-23-2072", "TCGA-23-1031", "TCGA-23-1117", # Cluster 1
+    "TCGA-25-2401", "TCGA-25-2399", "TCGA-25-1625", "TCGA-25-1328", "TCGA-25-1871", # Cluster 2
+    "TCGA-25-1315", "TCGA-25-1326", "TCGA-25-2391", "TCGA-25-1635", "TCGA-25-1627", # Cluster 3
+    "TCGA-57-1582", "TCGA-13-A5FU", "TCGA-57-1993", "TCGA-57-1994", "TCGA-57-1583"  # Cluster 4
+  ),
+  cluster_ilaria = c(
+    rep(1, 5), 
+    rep(2, 5), 
+    rep(3, 5), 
+    rep(4, 5)
+  )
+)
+
+# 3. Clean Dataset B to match IDs
+# We extract the first 12 characters (e.g., "TCGA-25-1326")
+df_clust <- data.frame(
+  patientID = substr(names(vec_kmean), 1, 12),
+  cluster_kmean = fpca_km$cluster,
+  cluster_ward = memb
+)
+
+# 4. Merge to find correspondence
+comparison_stroma <- inner_join(df_A, df_clust, by = "patientID") |> 
+  arrange(cluster_kmean, patientID)
+
+# 5. Display the Result
+#print(comparison_stroma)
+
+table("ilaria_clust" = comparison_stroma$cluster_ilaria, "valerio_clust" = comparison_stroma$cluster_kmean)
+```
+
+Comparison between the 2 results of my work
+```{r}
+table("benign_clust" = comparison_benign$cluster_kmean, "stroma_cluster" = comparison_stroma$cluster_kmean)
+```
+
+# Survival analysis
+
+```{r}
+ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+```
+
+
+```{r}
+df_combined <- ov_meta |> 
+  # Select only the columns we want to add from the first df
+  inner_join(df_clust |> dplyr::select(patientID, cluster_kmean), by = "patientID")
+```
+
+```{r}
+fit <- survfit(Surv(time, vital_status) ~ cluster, data = df_combined)
+(km_plot <- ggsurvplot(fit, data = df_combined, risk.table = TRUE, pval = TRUE, xlim = c(0,3000)))
+pairwise_survdiff(Surv(time, vital_status) ~ cluster, data = df_combined)
+```
+
+
+
+
+COSE DA FARE:
+
+dopo aver rimosso casi strani, prendo tutti i pazienti e faccio tutta la pipe
+con i gruppi di clustering faccio survival. 
+
+sketching: subsampling 50k cells, ribilianciare i punti con pesi
+
+unisco benign e stromal
+match i neoplastic con le altre.

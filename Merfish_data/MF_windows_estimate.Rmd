@@ -1,0 +1,72 @@
+---
+title: "Windows estimation through intensity of the channels"
+author: "Valerio Reffo"
+date: "2026-02-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta) 
+library(purrr)
+library(readxl)
+library(dplyr)
+library(spatialFDA)
+```
+
+
+```{r}
+spe_list <- readRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/spe_list_20slides_TCGA-OV.rds")
+```
+
+## Points intensity based window estimation
+```{r}
+n <- estimateReconstructionParametersSPE(
+      spe,
+      marks = "tier1",
+      imageCol = "unique_id",
+      markSelect = NULL,
+      plotHist = TRUE, 
+      nCores = 20
+)
+
+thres = mean(n$thres)
+bndw = mean(n$bndw)
+```
+
+
+Simple features collection for each imageCol value (aka sample) 
+```{r}
+allStructs <- reconstructShapeDensitySPE(
+      spe,
+      marks = "tier1",
+      imageCol = "unique_id",
+      markSelect = NULL,
+      nCores = 20
+)
+
+split_structs <- split(allStructs, allStructs$unique_id)
+
+# 2. Loop over each group, union the geometries, and convert to owin
+windows_list <- lapply(split_structs, function(subset_sf) {
+  combined_poly <- sf::st_union(subset_sf)
+  window_est <- as.owin(combined_poly)
+  return(window_est)
+})
+
+iwalk(windows_list, plot)
+```
+
+```{r}
+saveRDS(windows_list, file = "~/repositories/spatialPointProcess_clustering/dataset/Merfish_dataset/windows_estimated.rds")
+```
+

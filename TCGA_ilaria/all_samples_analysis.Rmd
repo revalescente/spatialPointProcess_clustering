@@ -1,0 +1,1343 @@
+---
+title: "All samples analysis"
+author: "Valerio Reffo"
+date: "2026-03-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(SpatialExperiment)
+library(anndataR)
+library(ggspavis)
+library(patchwork)
+library(spatstat.geom)
+library(spatstat)
+library(sosta)
+library(purrr)
+library(readxl)
+library(dplyr)
+library(spatialFDA)
+library(fda)
+# survival analysis
+library(survival)
+library(survminer)
+```
+
+Path of the HoverNet data
+
+```{r}
+data_path <- "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/h5ad"
+img_path <- "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/thumb"
+```
+
+# Micron per Pixel extraction
+
+Extract from xlsx file the info about mpp conversion
+```{r}
+xlsx_path <- "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_data/image_metadata_TCGA.xlsx"
+
+# 2. Read the excel file
+metadata <- read_excel(xlsx_path)
+
+# 2b. Correct row 2 because that slide is 40x, not 20x
+metadata <- metadata |>
+  mutate(
+    `Image Name` = sub("\\.[a-zA-Z0-9]+$", "", `Image Name`),
+    # Use grepl to match the start of the image name
+    `Objective Power` = if_else(grepl("TCGA-13-A5FU", `Image Name`), "40", `Objective Power`),
+    AppMag            = if_else(grepl("TCGA-13-A5FU", `Image Name`), "40", AppMag),
+    MPP               = if_else(grepl("TCGA-13-A5FU", `Image Name`), "0.252", MPP),
+    MPP_X             = if_else(grepl("TCGA-13-A5FU", `Image Name`), "0.252", MPP_X),
+    MPP_Y             = if_else(grepl("TCGA-13-A5FU", `Image Name`), "0.252", MPP_Y)
+  )
+
+# # 3. Filter for your 6 samples and extract the Image Name and MPP columns
+# # (Note: using backticks because the column name has a space)
+# mpp_values <- metadata |> 
+#   dplyr::mutate(core_id = sub("\\.svs$", "", `Image Name`),
+#     patientID = substr(`Image Name`, 1, 12)) |> 
+#   dplyr::select(`Image Name`, patientID, MPP, core_id) |> 
+#   dplyr::mutate(MPP = as.numeric(MPP))
+# 
+# # 4. Convert it into a named vector so you can easily use it later
+# # (e.g., mpp_vector["TCGA-42-2587...svs"] will return its specific MPP)
+# mpp_vector <- setNames(mpp_values$MPP, mpp_values$`Image Name`)
+
+# Print the result
+# print(mpp_vector)
+```
+
+## Windows
+
+HoverNet masks saving and reading
+
+```{r}
+# win_hovernet <- imap(spe_list, \(spe, name) {
+# 
+#   base_dir <- "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/mask"
+#   png_name <- paste0(sub("\\.[a-zA-Z0-9]+$", "", name), ".png")
+#   img_file <- file.path(base_dir, png_name)
+#   
+#   # Add a safety check so you get a clear error if the file is truly missing
+#   if (!file.exists(img_file)) {
+#     stop(paste("Cannot find image file:", img_file))
+#   }
+#   
+#   img <- imager::load.image(img_file)
+#   
+#   return(img)
+# })
+# 
+# # saveRDS(win_hovernet, "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_data/window_masks_HoverNet_fullsamples.rds")
+# 
+# 
+# win_hovernet <- readRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_data/window_masks_HoverNet_fullsamples.rds")
+```
+
+## Metadata 
+
+```{r}
+metadata <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+```
+
+
+Function to transform from anndata to spatialExperiment
+```{r}
+ann2spe <- \(data_path, 
+             spat_coords_name = c("x", "y"), 
+             img_path = NULL, 
+             mpp_value = NULL, ...) {
+  ann <- anndataR::read_h5ad(data_path)
+  #object to build SpatialExperiment
+  counts <- t(ann$X) # transpose it
+  cd <- ann$obs
+  meta <- ann$uns
+  spat <- ann$obsm$spatial
+  colnames(spat) <- spat_coords_name
+  cd <- cbind(cd, spat)
+  spe <- SpatialExperiment::SpatialExperiment(assays = base::list("counts" = counts), 
+                                              colData = cd,
+                                              metadata = meta,
+                                              spatialCoordsNames = spat_coords_name,
+                                              imageSources = img_path, ...)
+  metadata(spe)$MPP <- mpp_value
+  spe
+}
+```
+
+Reading all the samples togheter
+
+```{r}
+
+# spe_list <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/spe_list_107samples_TCGA-OV.rds")
+
+# 2. Get a list of ALL files in that folder ending with .h5ad
+# full.names = TRUE ensures we get the complete file path, not just the file name
+# h5_files <- list.files(path = data_path, pattern = "\\.h5ad$", full.names = TRUE)
+# 
+# # Optional: Set the names of the vector to the file names (without the path) 
+# # so your final list of SPE objects is neatly named!
+# names(h5_files) <- sub("\\.h5ad$", "", basename(h5_files))
+# 
+# # 3. Loop through all the files and apply your function
+# spe_list <- imap(h5_files, function(current_h5_file, file_name) {
+#   
+#   # Optional: If your images are in another folder, you can construct the img_path here
+#   current_img_file <- file.path(img_path, paste0(file_name, ".png")) 
+# 
+#   # B. Look up the exact MPP value for this specific core_id
+#   current_mpp <- unname(mpp_values$MPP[mpp_values$core_id == file_name])
+#   
+#   # Optional check: If MPP is missing from the tibble, warn the user
+#   if (is.na(current_mpp)) {
+#     message("Warning: No MPP value found for ", file_name, ". Setting to NA.")
+#   }
+#   
+#   # 4. Use tryCatch to prevent the loop from crashing if one file is broken
+#   tryCatch({
+#     
+#     # Call your custom function!
+#     # (If you don't have images/mpp values for this batch, leave them as NULL)
+#     spe <- ann2spe(
+#       data_path = current_h5_file,
+#       img_path = current_img_file,      # Update this if you have images
+#       mpp_value = current_mpp      # Update this if you have mpp values
+#     )
+#     
+#     return(spe)
+#     
+#   }, error = function(e) {
+#     # If a file fails to load, print an error message and return NULL
+#     message("Failed to load: ", basename(current_h5_file))
+#     message("Error: ", e$message)
+#     return(NULL)
+#   })
+#   
+# }) |> 
+#   # 5. Drop any NULLs (files that failed to load)
+#   compact()
+
+#saveRDS(spe_list, "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/spe_list_107samples_TCGA-OV.rds")
+```
+
+# Checking for bad samples
+
+Sample spe_list 
+```{r}
+# set.seed(123)
+# thumbs_samples <- imap(spe_list, \(spe, name) {
+#   subspe <- spe[, sample(ncol(spe), 10000)]
+#   plot <- ggplot(spatialCoords(subspe), aes(x = x, y = y)) +
+#     # 2. Plot the valid cells (Extracts coordinates on the fly)
+#     geom_point(color = "blue", size = 0.1, alpha = 0.5) +
+#     # Force standard Cartesian proportions so the image isn't squished
+#     coord_fixed() +
+#     theme_minimal() +
+#     labs(
+#       title = name)
+#   plot
+# })
+# thumbs_samples
+```
+
+Images with apparently more copy of the same tissue
+```{r}
+double_ids <- c(
+  "TCGA-13-A5FT",
+  "TCGA-25-1631",
+  "TCGA-25-1632",
+  "TCGA-25-1633",
+  "TCGA-25-1877",
+  "TCGA-42-2582",
+  "TCGA-42-2588",
+  "TCGA-42-2589",
+  "TCGA-42-2590",
+  "TCGA-42-2591",
+  "TCGA-42-2593",
+  "TCGA-59-A5PD",
+  "TCGA-OY-A56P",
+  "TCGA-OY-A56Q",
+  "TCGA-VG-A8LO",
+  "TCGA-VG-A8LO"   # doppio perché appare 2 volte 01-DX1 e 02-DX2
+)
+
+#saveRDS(double_ids, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/bad_samples_fromthe107.rds")
+```
+
+Remove bad samples from the spe_list
+Add the sample_id with the short name of the sample to identify the patient and then filter the samples in which I have similar slice of tissue
+and I can't understand if they are replicate or adiacent samples, and in which direction is the adiacence.
+
+```{r}
+# spe_list <- imap(spe_list, \(spe, name) {
+#   spe$sample_id <- NULL
+#   spe$sample_id <- substr(name, 1, 12)
+#   spe
+# })
+# spe_list <- spe_list[!substr(names(spe_list), 1, 12) %in% double_ids]
+```
+
+16 samples removed
+
+Dimension of spe_list 
+```{r}
+# format(object.size(spe_list), units = "MB")
+```
+
+Resave the thing and divide it in 2 half
+```{r}
+#saveRDS(spe_list, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/spe_list_91_good_samples.rds")
+
+# spe_list <- readRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/spe_list_91_good_samples.rds")
+```
+
+```{r}
+# length(spe_list)
+# (1:91)[1:floor(length(spe_list)/2)]
+# (1:91)[-(1:floor(length(spe_list)/2))]
+
+# # first 45 samples
+# spe_list[1:floor(length(spe_list)/2)] |> 
+#   saveRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/spe_list_first_45_good_samples.rds")
+# 
+# # second 46 samples
+# spe_list[-(1:floor(length(spe_list)/2))] |> 
+#   saveRDS("/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/spe_list_second_46_good_samples.rds")
+
+```
+
+
+# ppp objects creation 
+
+```{r}
+save_ppp_individually <- function(spe_list, mask_hovernet, metadata, 
+                                  out_dir = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/samples_ppp") {
+  
+  # 1. Ensure the output directory exists
+  if (!dir.exists(out_dir)) {
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    message(paste("Created directory:", out_dir))
+  }
+  
+  # 2. Iterate over each sample
+  for (sample_name in names(spe_list)) {
+    message(paste("Processing:", sample_name))
+    
+    spe  <- spe_list[[sample_name]]
+    mask <- mask_hovernet[[sample_name]]
+    
+    # Safety check
+    if (is.null(mask)) {
+      warning(paste("No mask found for", sample_name, "- skipping."))
+      next
+    }
+    
+    # 3. Extract metadata for the current sample
+    meta_row <- metadata |> 
+      dplyr::filter(`Image Name` == sample_name) |> 
+      dplyr::select(AppMag, MPP)
+    
+    # Safely default to 40 and 1 if metadata is missing or NA
+    if (nrow(meta_row) == 0) {
+      app_mag <- 40
+      mpp     <- 1
+    } else {
+      app_mag <- tidyr::replace_na(as.numeric(meta_row$AppMag[1]), 40)
+      mpp     <- tidyr::replace_na(as.numeric(meta_row$MPP[1]), 1)
+    }
+    
+    # A. Extract logical matrix and transpose to [y, x]
+    mask_mat <- mask[,,1,1] > 0.5  
+    mask_spatstat <- t(mask_mat)                 
+    
+    # B. Create the thumbnail window
+    # Note: If width()/height() are custom functions, ensure they are loaded. 
+    # Otherwise, you can use dim(mask)[1] and dim(mask)[2]
+    win_thumb <- owin(
+      xrange = c(0, dim(mask)[1]), 
+      yrange = c(0, dim(mask)[2]), 
+      mask = mask_spatstat
+    )
+    
+    # C. Calculate exact scale
+    exact_scale <- app_mag / 1.25
+    
+    # D. Stretch the window
+    win_final <- affine(win_thumb, mat = diag(c(exact_scale, exact_scale)))
+    
+    # E. Build the PPP object
+    coords <- spatialCoords(spe)
+    my_ppp <- ppp(
+      x = coords[, "x"], 
+      y = coords[, "y"], 
+      window = win_final,
+      marks = as.factor(spe$type)
+    )
+    
+    # F. Rescale
+    if (mpp == 1) {
+      warning(paste("No MPP found for", sample_name, "- leaving in pixels"))
+    }
+    
+    ppp_microns <- rescale(my_ppp, s = 1/mpp, unitname = c("micron", "microns"))
+    
+    # 4. Save the individual object to the specified directory
+    file_path <- file.path(out_dir, paste0(sample_name, ".rds"))
+    saveRDS(ppp_microns, file = file_path)
+    
+    message(paste("Saved successfully:", file_path))
+  }
+  
+  message("All samples processed.")
+}
+
+# # Run the function:
+# save_ppp_individually(spe_list, win_hovernet, metadata)
+```
+
+Iterative reading and acting with ppp samples
+```{r}
+# sample_names <- names(spe_list)
+# saveRDS(sample_names, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/samples_name.rds")
+```
+
+
+```{r}
+# path_dir = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/samples_ppp"
+# map(sample_names, \(sample_name){
+#     file_path <- file.path(path_dir, paste0(sample_name, ".rds"))
+#     ppp_sample <- readRDS(file_path)
+#     
+#     # 1. Save the original marks vector
+#     original_marks <- marks(ppp_sample)
+#     
+#     # 2. Create the new merged vector
+#     target_levels <- c("benign epithelial", "stromal")
+#     
+#     if (any(target_levels %in% levels(original_marks))) {
+#       merged_marks <- forcats::fct_collapse(original_marks, 
+#                                    "stromal_benign" = target_levels)
+#     } else {
+#       merged_marks <- original_marks # Fallback if neither exist
+#     }
+#     
+#     # 3. Assign BOTH vectors to the ppp object as a data frame
+#     marks(ppp_sample) <- data.frame(
+#       original_type = original_marks,
+#       merged_type   = merged_marks
+#     )
+#     saveRDS(ppp_sample, file_path)
+# })
+```
+
+# Read the ppp objects
+
+```{r}
+sample_names <- readRDS(file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/samples_name.rds")
+path_dir = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/samples_ppp"
+ppp_list <- purrr::map(sample_names, \(sample_name){
+    file_path <- file.path(path_dir, paste0(sample_name, ".rds"))
+    ppp_sample <- readRDS(file_path)
+    ppp_sample
+})
+names(ppp_list) <- sample_names
+head(ppp_list)
+```
+
+
+Plot to check if the mask is correct and the points are inside
+```{r eval=FALSE, include=FALSE}
+poinside_plot <- \(ppp){
+  ggplot() +
+    # 1. Plot the tissue mask (Extracts pixels on the fly)
+    geom_raster(data = as.data.frame(Window(ppp)),
+                aes(x = x, y = y), fill = "grey80") +
+
+    # 2. Plot the valid cells (Extracts coordinates on the fly)
+    geom_point(data = as.data.frame(ppp),
+               aes(x = x, y = y), color = "blue", size = 0.1, alpha = 0.5) +
+
+    # 3. Plot the rejected cells (Extracts rejects on the fly)
+    geom_point(data = as.data.frame(attr(ppp, "rejects")),
+               aes(x = x, y = y), color = "red", size = 0.1, alpha = 0.5) +
+
+    # Force standard Cartesian proportions so the image isn't squished
+    coord_fixed() +
+    theme_minimal() +
+    labs(
+      title = "Cell Alignment Check",
+      subtitle = "Grey: Tissue Mask | Blue: Valid Cells | Red: Rejected Cells",
+      x = "X Coordinate",
+      y = "Y Coordinate"
+    )
+}
+map(ppp_list, poinside_plot)
+```
+
+# Second order statistic analysis
+
+npoints for each cell type and potential RAM cost
+```{r eval=FALSE, include=FALSE}
+library(spatstat)
+library(purrr)
+
+# Define a safe threshold based on your RAM (e.g., 100 million pairs is usually safe for 16GB RAM)
+# You might need to lower this to 50,000,000 if you have less RAM or other programs open.
+MAX_PAIRS_THRESHOLD <- 100 * 10^6 
+
+cost_npoints <- map(ppp_list, function(ppp_obj) {
+  
+  # 1. Extract the specific points
+  n_neoplastic <- npoints(subset(ppp_obj, marks == "neoplastic"))
+  n_stromal    <- npoints(subset(ppp_obj, marks == "stromal"))
+  
+  # 2. Calculate the "cost"
+  pair_cost <- as.numeric(n_neoplastic) * as.numeric(n_stromal)
+  
+  # 3. Check if it exceeds the safety limit
+  if (pair_cost > MAX_PAIRS_THRESHOLD) {
+    message(sprintf("Skipping tile: Too large (%s pairs)", format(pair_cost, scientific = FALSE)))
+    return(NULL) # Or return NA, or a placeholder
+  }
+  
+  # 4. If safe, run the function
+  tryCatch({
+    Lcross(ppp_obj, i = "neoplastic", j = "stromal", correction = "best")
+  }, error = function(e) {
+    message("Error in Lcross: ", e$message)
+    return(NULL)
+  })
+})
+```
+
+# memory check
+
+Check if Lcross will crash - all unsupervised copilot code 
+```{r eval=FALSE, include=FALSE}
+library(spatstat)
+library(scales) # For readable formatting (e.g., "1.2 GB")
+
+estimate_lcross_memory <- function(ppp_obj, type_i, type_j, available_ram_gb = 60) {
+  
+  # 1. Check if marks exist and contain the requested types
+  if (is.null(marks(ppp_obj))) {
+    warning("Object has no marks.")
+    return(NULL)
+  }
+  
+  # 2. Count points
+  # We use sum(marks == ...) which is faster than subsetting the whole object
+  n_i <- sum(marks(ppp_obj) == type_i)
+  n_j <- sum(marks(ppp_obj) == type_j)
+  
+  # 3. Calculate total pairs
+  # We use as.numeric to prevent integer overflow for very large numbers
+  n_pairs <- as.numeric(n_i) * as.numeric(n_j)
+  
+  # 4. Estimate Memory Usage
+  # Base R double precision = 8 bytes per number.
+  # Spatstat's Lcross/Kcross often needs to store:
+  # - The distances (8 bytes)
+  # - Edge correction weights (8 bytes)
+  # - Temporary sorting/index vectors (4-8 bytes)
+  # - Overhead for function calls
+  # We use a safety multiplier of ~32 bytes per pair to be conservative.
+  bytes_per_pair <- 32 
+  est_bytes <- n_pairs * bytes_per_pair
+  est_gb <- est_bytes / (1024^3)
+  
+  # 5. Determine if it's safe for your server
+  # We leave 10% buffer for the OS and R overhead
+  safe_limit <- available_ram_gb * 0.90 
+  is_safe <- est_gb < safe_limit
+  
+  # 6. Return a summary list
+  return(list(
+    n_i = n_i,
+    n_j = n_j,
+    n_pairs = n_pairs,
+    est_memory_gb = round(est_gb, 4),
+    safe_to_run = is_safe,
+    message = sprintf(
+      "Tile Analysis: %s vs %s\n  - Count %s: %d\n  - Count %s: %d\n  - Pairs: %s\n  - Est. RAM: %s GB (Limit: %.1f GB) -> %s",
+      type_i, type_j, type_i, n_i, type_j, n_j, 
+      label_number(scale_cut = cut_short_scale())(n_pairs), 
+      round(est_gb, 2), safe_limit,
+      ifelse(is_safe, "SAFE", "DANGER")
+    )
+  ))
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+# Example usage iterating over your list
+# 1. Create a data frame of estimates
+memory_check <- imap(ppp_list, function(ppp, name) {
+  
+  est <- estimate_lcross_memory(ppp, 
+                                type_i = "neoplastic", 
+                                type_j = "stromal", 
+                                available_ram_gb = 60)
+  
+  # Return a tidy row for a dataframe
+  data.frame(
+    Sample = name,
+    N_Neoplastic = est$n_i,
+    N_Stromal = est$n_j,
+    Pairs = est$n_pairs,
+    Est_RAM_GB = est$est_memory_gb,
+    Safe = est$safe_to_run
+  )
+})
+
+# 2. Combine into a summary table
+df_memory <- do.call(rbind, memory_check)
+
+# 3. View the dangerous tiles
+print(df_memory)
+
+# 4. Run Lcross ONLY on safe tiles
+# safe_tiles <- df_memory$Sample[df_memory$Safe == TRUE]
+# 
+# Lcross_results <- lapply(safe_tiles, function(tile_name) {
+#   message("Processing: ", tile_name)
+#   Lcross(ppp_sub[[tile_name]], i = "neoplastic", j = "stromal", correction = "best")
+# })
+```
+
+Check memory usage based on rmax - all unsupervised copilot code 
+```{r eval=FALSE, include=FALSE}
+check_memory_rmax <- function(ppp_obj, type_i, type_j, rmax, available_gb = 60) {
+  
+  # 1. Get counts
+  n_i <- npoints(subset(ppp_obj, marks == type_i))
+  n_j <- npoints(subset(ppp_obj, marks == type_j))
+  
+  # 2. Get Area of the window
+  area_val <- area(Window(ppp_obj))
+  
+  # 3. Calculate Global Density of type J (points per unit area)
+  lambda_j <- n_j / area_val
+  
+  # 4. Estimate neighbors per point
+  # Expected number of J points within rmax of an I point (assuming homogeneity)
+  # Area of search circle = pi * r^2
+  search_area <- pi * rmax^2
+  avg_neighbors <- lambda_j * search_area
+  
+  # 5. Total estimated pairs to store
+  # If points are highly clustered, this might be an underestimate, so we multiply by a safety factor (e.g., 2x or 3x)
+  clustering_safety_factor <- 3 
+  total_pairs_est <- n_i * avg_neighbors * clustering_safety_factor
+  
+  # 6. Convert to Memory (GB)
+  # 32 bytes per pair is a conservative estimate for R vectors + overhead
+  bytes_per_pair <- 32 
+  mem_est_bytes <- total_pairs_est * bytes_per_pair
+  mem_est_gb <- mem_est_bytes / 10^9
+  
+  # 7. Output results
+  cat(sprintf("--- Memory Check for rmax = %s ---\n", rmax))
+  cat(sprintf("Tile: %s x %s\n", type_i, type_j))
+  cat(sprintf("Points: %s (i) vs %s (j)\n", n_i, n_j))
+  cat(sprintf("Search Area (pi*r^2): %.2f\n", search_area))
+  cat(sprintf("Est. Neighbors per point: %.2f (Global Avg)\n", avg_neighbors))
+  cat(sprintf("Est. Total Pairs (with %dx cluster safety): %s\n", clustering_safety_factor, format(round(total_pairs_est), big.mark=",")))
+  cat(sprintf("Est. RAM Usage: %.4f GB\n", mem_est_gb))
+  
+  if(mem_est_gb > (available_gb * 0.8)) {
+    cat("⚠️  WARNING: MIGHT CRASH SERVER\n")
+    return(FALSE)
+  } else {
+    cat("✅  SAFE TO RUN\n")
+    return(TRUE)
+  }
+}
+
+# --- Usage Example ---
+map(ppp_list, \(ppp) {check_memory_rmax(ppp, "neoplastic", "stromal", rmax = 100)})
+```
+
+
+# Homogeneus ppp
+
+## Lfunction estimate
+
+L function between neoplastic and stromal
+```{r}
+# Lcross_homo <- map(ppp_list, \(ppp_obj) {
+#      # Calculate Lcross
+#      L <- Lcross(ppp_obj, i = "neoplastic", j = "stromal", correction = "border", rmax = 50)
+#      L 
+# }) 
+```
+
+Downsample to avoid crash
+
+Function to estimate Lcross function for homogeneus point pattern between 2 marks and with downsample
+```{r}
+Lcross_personal <- function(ppp_obj, mark_i, mark_j, mark_column, downsample = TRUE, n_down = 10000, ...) {
+  
+  # 0. If marks are a dataframe, extract the specific column we want to use!
+  if (is.data.frame(marks(ppp_obj))) {
+    marks(ppp_obj) <- marks(ppp_obj)[[mark_column]]
+  }
+  # 1. Get the indices of the specific cell types dynamically
+  idx_i <- which(marks(ppp_obj) == mark_i)
+  idx_j <- which(marks(ppp_obj) == mark_j)
+  
+  # Safety check: ensure both cell types actually exist in the image!
+  if(length(idx_i) < 2 | length(idx_j) < 2) {
+    warning(paste("Not enough points for", mark_i, "and/or", mark_j, "to compute Lcross. Returning NULL."))
+    return(NULL)
+  }
+  
+  # 2. Handle Downsampling
+  if (downsample) {
+    # Randomly sample a maximum of n_down cells of each type
+    keep_i <- sample(idx_i, min(length(idx_i), n_down))
+    keep_j <- sample(idx_j, min(length(idx_j), n_down))
+    
+    # Subset the ppp object
+    ppp_sub <- ppp_obj[c(keep_i, keep_j)]
+    
+  } else {
+    # Even if we don't downsample, subsetting to JUST the two marks of interest 
+    # saves a massive amount of memory for spatstat calculation
+    ppp_sub <- ppp_obj[c(idx_i, idx_j)]
+  }
+  
+  # 3. Calculate Lcross dynamically using the provided mark names
+  L <- Lcross(ppp_sub, 
+              i = mark_i, 
+              j = mark_j, ...)
+  
+  return(L)
+}
+```
+
+We investigate about the relationship between neoplastic nuclei and stromal/benign epitelium nuclei
+```{r}
+
+r_values <- seq(0, 100, length.out = 200)
+
+Lcross_stroben <- map(ppp_list, \(ppp_obj) {
+  Lcross_personal(ppp_obj, 
+                  mark_i = "neoplastic", 
+                  mark_j = "stromal_benign", 
+                  mark_column = "merged_type", 
+                  downsample = TRUE, n_down = 40000, rmax = 100, 
+                  correction = "border", r = r_values)
+})
+
+#saveRDS(Lcross_stroben, file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/Lcross_stromal_benignEpitelial_91_samples.rds")
+```
+
+Let's check for NA in the result
+```{r}
+na_summary_per_sample <- imap_dfr(Lcross_stroben, \(fv_obj, sample_name) {
+  
+  # Handle cases where the Lcross calculation returned NULL
+  if (is.null(fv_obj)) {
+    return(tibble(
+      sample = sample_name,
+      r_na = NA_integer_,
+      theo_na = NA_integer_,
+      border_na = NA_integer_,
+      status = "Skipped (NULL)"
+    ))
+  }
+  
+  # Convert the fv object to a standard dataframe
+  df <- as.data.frame(fv_obj)
+  
+  # Count NAs for each specific column
+  tibble(
+    sample = sample_name,
+    r_na = sum(is.na(df$r)),
+    theo_na = sum(is.na(df$theo)),
+    border_na = sum(is.na(df$border)),
+    status = "Computed"
+  )
+})
+
+# View the per-sample breakdown
+print(na_summary_per_sample)
+
+# 2. Count NAs for EVERYTHING (Grand Totals)
+grand_totals <- na_summary_per_sample |> 
+  summarise(
+    total_r_NAs = sum(r_na, na.rm = TRUE),
+    total_theo_NAs = sum(theo_na, na.rm = TRUE),
+    total_border_NAs = sum(border_na, na.rm = TRUE),
+    total_failed_samples = sum(status == "Skipped (NULL)")
+  )
+
+# View the total counts
+print(grand_totals)
+```
+
+There should be some NA for overflow, but there is no one... ok i guess
+
+Plot the results
+
+```{r}
+plot_fv_list <- function(list_of_funcs, comparison_df, correction = "border") {
+  
+  # 1. Run the map_dfr block dynamically on whatever list you provide
+  df_lcross <- map_dfr(names(list_of_funcs), function(slide_name) {
+    
+    # Extract the specific L-function object from the provided list
+    L_obj <- list_of_funcs[[slide_name]]
+    
+    as.data.frame(L_obj) |> 
+      mutate(
+        Slide = slide_name,
+        # Use .data[[correction]] to dynamically grab the 'border' column (or 'iso', etc.)
+        L_r_minus_r = .data[[correction]] - r,  
+        
+        # Extract the marks names exactly as you designed
+        mark_i = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][1]),
+        mark_j = trimws(strsplit(gsub("list\\(|\\)", "", attr(L_obj, "fname")[2]), ",")[[1]][2])
+      )
+  })
+  
+  # 2. Join the metadata (comparison_benign) into the dataframe
+  df_lcross <- df_lcross |> 
+    mutate(
+      # Extract the first 12 characters to match "TCGA-XX-XXXX"
+      patientID = substr(Slide, 1, 12)
+    ) |> 
+    # Merge the cluster info based on the patientID
+    left_join(comparison_df, by = "patientID") |> 
+    # Convert cluster_ilaria to a factor so ggplot uses discrete colors instead of a continuous gradient
+    mutate(cluster_ilaria = as.factor(cluster))
+  
+  # 3. Build the ggplot
+  # Note: group = Slide ensures each patient gets their own line
+  #       color = cluster_ilaria applies the cluster colors
+  p <- ggplot(df_lcross, aes(x = r, y = L_r_minus_r, group = Slide, color = cluster_ilaria)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(alpha = 0.7, linewidth = 0.6) + 
+    theme_minimal() +
+    labs(
+      title = paste0("L-cross Function: ", df_lcross$mark_i[1], " vs ", df_lcross$mark_j[1]),
+      subtitle = "Centered L-function (L(r) - r). Positive = Attraction, Negative = Repulsion",
+      x = "Radius (r)",
+      y = "L(r) - r",
+      color = "Cluster" # Renamed legend title
+    ) +
+    theme(legend.position = "right")
+  
+  return(p)
+}
+```
+
+load the comparison_df
+```{r}
+meta_ilaria <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+```
+
+
+```{r}
+plot_colored <- plot_fv_list(
+  list_of_funcs = Lcross_stroben, 
+  comparison_df = meta_ilaria, 
+  correction = "border"
+)
+
+plot_colored
+```
+
+# Functional Data Analysis
+
+
+# generic function for smoothing funs
+```{r}
+fsmooth <- function(fcross_list, fun, M = 6, genLfun.fd = 4, centrata = F, ...)
+{
+
+  # 1. Calculate raw L-functions (Common for both)
+  r <- fcross_list[[1]]$r
+  mat_fun <- sapply(fcross_list, function(x) x$border)
+  
+  # 2. Apply centering ONLY if requested
+  if(centrata == TRUE){
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 3. Create Basis and Smooth
+  K <- length(r) + M - 2
+  genbasis <- create.bspline.basis(range(r), K, M, r)
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = 1e-11)
+  
+  genfdSmooth <- smooth.basis(r, mat_fun, genfdPar)
+  Genfun.fd <- genfdSmooth$fd
+  
+  # 4. Set Names
+  fdn_dist <- paste("Distanza (da 0 a", max(r), "micron)")
+  fdnames <- list(fdn_dist,
+                  "Gene" = colnames(mat_fun), # Crucial: use names of surviving columns
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+  
+  return(list(fd = Genfun.fd, fdPar = genfdPar, 
+              basis = genbasis, mat = mat_fun, r = r))
+}
+```
+
+
+
+```{r}
+Lfun_stroben <- fsmooth(Lcross_stroben, centrata = T)
+```
+
+```{r}
+plot(Lfun_stroben$fd)
+lines(c(0,100), c(0,0), col = "gold", lwd = 2)
+```
+
+## Comparison between neoplastic and benign.epithelial
+
+### Functional PCA
+
+Calcoliamo fpca per 4 componenti e mostriamo il risultato sulla rotazione VARIMAX
+
+```{r}
+fpca <- pca.fd(Lfun_stroben$fd, nharm = 4, Lfun_stroben$fdPar)
+rownames(fpca$scores) <- names(Lcross_stroben) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca)
+```
+
+### fPCA plot ruotate per VARIMAX
+
+The plots below show the mean function and the effects of adding (+) and subtracting (−) a
+suitable multiple of the first (resp. second) principal component function.
+
+```{r eval=FALSE, include=FALSE}
+plot.pca.fd(fpcaVarmx, cex.main=0.9)
+```
+
+## Clustering
+
+Applichiamo due metodi di clustering sugli scores delle prime 4 componenti.
+Clustering gerarchico con metodo Ward e kmeans
+
+```{r}
+set.seed(123)
+fpca_km <- kmeans(fpca$scores[,c(1,4)], 4)
+fpca_hc <- hclust(dist(fpca$scores[,c(1,4)]), method = "ward.D2")
+memb <- cutree(fpca_hc, k = 4)
+```
+
+Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5 cluster.
+
+```{r}
+dhc <- as.dendrogram(fpca_hc)
+plot(dhc, cex = 0.1, horiz = T)
+#ggdendrogram(dhc, rotate = TRUE, size = 2)
+table(kmean = fpca_km$cluster)
+table(ward.d2 = memb)
+```
+
+```{r}
+plot(fpca$scores[,1], fpca$scores[,2], col = fpca_km$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca$scores[,1], fpca$scores[,2], col = memb, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+## Check the outlier
+```{r}
+poinside_plot <- \(ppp, title_p = "Spatial point pattern"){
+  ggplot() +
+    # 1. Plot the tissue mask (Extracts pixels on the fly)
+    geom_raster(data = as.data.frame(Window(ppp)), 
+                aes(x = x, y = y), fill = "grey80") +
+    
+    # 2. Plot the valid cells (Extracts coordinates on the fly)
+    geom_point(data = as.data.frame(ppp), 
+               aes(x = x, y = y, color = merged_type), size = 0.05, alpha = 0.5) +
+
+    # Force standard Cartesian proportions so the image isn't squished
+    coord_fixed() +
+    theme_minimal() +
+    labs(
+      title = title_p,
+      subtitle = "Colored by cell type with merged types",
+      x = "X Coordinate", 
+      y = "Y Coordinate"
+    )
+}
+```
+
+Compare it with the patientID ppp with the lowest PC1 and the PC1 nearest to zero
+
+```{r}
+which.max(fpca$scores[,1]) # TCGA-23-1121-01Z-00-DX1.E2F25441-32C3-46BF-A845-CB4FA787E8CB OUTLIER
+which.min(fpca$scores[,1]) # TCGA-23-1030-01Z-00-DX1.FC93147F-FB55-4C62-B187-337A5C107096 
+which((fpca$score[,1] > -5) & (fpca$score[,1] < 5)) # TCGA-57-1582-01Z-00-DX1.BDF02DAA-E520-46BD-A479-58CAA4354B1A the 83rd row
+
+poinside_plot(ppp_list[[24]], title_p = "highest pc1 and pc2")
+poinside_plot(ppp_list[[which.min(fpca$scores[,1])]], title_p = "lowest pc1 highest pc2")
+poinside_plot(ppp_list[[83]], title_p = "near zero pc1 and pc2")
+```
+
+let's remove the sample 24 and redo the analysis
+
+```{r}
+df_ilaria <- meta_ilaria |> 
+  dplyr::select(patientID, cluster)
+# 3. Clean Dataset B to match IDs
+# We extract the first 12 characters (e.g., "TCGA-25-1326")
+df_clust <- data.frame(
+  patientID = substr(names(memb), 1, 12),
+  cluster_kmean = fpca_km$cluster,
+  cluster_ward = memb
+) |> print()
+
+# 4. Merge to find correspondence
+comparison_stroben <- inner_join(df_ilaria, df_clust, by = "patientID") |> 
+  arrange(cluster_ward, patientID)
+
+# 5. Display the Result
+print(comparison_stroben)
+
+table("ilaria_clust" = comparison_stroben$cluster, "valerio_clust" = comparison_stroben$cluster_ward)
+```
+
+## Comparison between results
+
+```{r eval=FALSE, include=FALSE}
+df_A <- data.frame(
+  patientID = c(
+    "TCGA-OY-A56P", "TCGA-23-1021", "TCGA-23-2072", "TCGA-23-1031", "TCGA-23-1117", # Cluster 1
+    "TCGA-25-2401", "TCGA-25-2399", "TCGA-25-1625", "TCGA-25-1328", "TCGA-25-1871", # Cluster 2
+    "TCGA-25-1315", "TCGA-25-1326", "TCGA-25-2391", "TCGA-25-1635", "TCGA-25-1627", # Cluster 3
+    "TCGA-57-1582", "TCGA-13-A5FU", "TCGA-57-1993", "TCGA-57-1994", "TCGA-57-1583"  # Cluster 4
+  ),
+  cluster_ilaria = c(
+    rep(1, 5), 
+    rep(2, 5), 
+    rep(3, 5), 
+    rep(4, 5)
+  )
+)
+
+# 3. Clean Dataset B to match IDs
+# We extract the first 12 characters (e.g., "TCGA-25-1326")
+df_clust <- data.frame(
+  patientID = substr(names(vec_kmean), 1, 12),
+  cluster_kmean = fpca_km$cluster,
+  cluster_ward = memb
+)
+
+# 4. Merge to find correspondence
+comparison_stroma <- inner_join(df_A, df_clust, by = "patientID") |> 
+  arrange(cluster_kmean, patientID)
+
+# 5. Display the Result
+#print(comparison_stroma)
+
+table("ilaria_clust" = comparison_stroma$cluster_ilaria, "valerio_clust" = comparison_stroma$cluster_kmean)
+```
+
+Comparison between the 2 results of my work
+```{r eval=FALSE, include=FALSE}
+table("benign_clust" = comparison_benign$cluster_kmean, "stroma_cluster" = comparison_stroma$cluster_kmean)
+```
+
+# Survival analysis
+
+```{r}
+ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+```
+
+
+```{r}
+df_combined <- ov_meta |> 
+  # Select only the columns we want to add from the first df
+  inner_join(df_clust |> dplyr::select(patientID, cluster_kmean), by = "patientID")
+```
+
+```{r}
+set.seed(42)
+fit <- survfit(Surv(time, vital_status) ~ cluster, data = df_combined)
+(km_plot <- ggsurvplot(fit, data = df_combined, risk.table = TRUE, pval = TRUE, xlim = c(0,3000)))
+pairwise_survdiff(Surv(time, vital_status) ~ cluster, data = df_combined)
+```
+
+# REMOVE THE OUTLIER
+
+```{r}
+Lcross_stroben_filtered <- Lcross_stroben[names(Lcross_stroben) != "TCGA-23-1121-01Z-00-DX1.E2F25441-32C3-46BF-A845-CB4FA787E8CB"]
+```
+
+```{r}
+Lfun_stroben_filtered <- fsmooth(Lcross_stroben_filtered, centrata = T)
+plot(Lfun_stroben_filtered$fd)
+lines(c(0,100), c(0,0), col = "gold", lwd = 2)
+```
+
+```{r}
+fpca_filt <- pca.fd(Lfun_stroben_filtered$fd, nharm = 4, Lfun_stroben_filtered$fdPar)
+rownames(fpca_filt$scores) <- names(Lcross_stroben_filtered) # "nome" dei pazienti (numero del paziente)
+
+fpcaVarmx <- varmx.pca.fd(fpca_filt)
+
+
+set.seed(123)
+fpca_km_filt <- kmeans(fpca_filt$scores[,c(1,4)], 4)
+fpca_hc_filt <- hclust(dist(fpca_filt$scores[,c(1,4)]), method = "ward.D2")
+memb_filt <- cutree(fpca_hc_filt, k = 4)
+```
+
+```{r}
+#ggdendrogram(dhc, rotate = TRUE, size = 2)
+table(kmean = fpca_km_filt$cluster)
+table(ward.d2 = memb_filt)
+```
+
+```{r}
+plot(fpca_filt$scores[,1], fpca_filt$scores[,2], col = fpca_km_filt$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca_filt$scores[,1], fpca_filt$scores[,2], col = memb_filt, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+```{r}
+df_ilaria <- meta_ilaria |> 
+  dplyr::select(patientID, cluster)
+# 3. Clean Dataset B to match IDs
+# We extract the first 12 characters (e.g., "TCGA-25-1326")
+df_clust_filt <- data.frame(
+  patientID = substr(names(memb_filt), 1, 12),
+  cluster_kmean = fpca_km_filt$cluster,
+  cluster_ward = memb_filt
+) |> print()
+
+# 4. Merge to find correspondence
+comparison_stroben_filt <- inner_join(df_ilaria, df_clust_filt, by = "patientID") |> 
+  arrange(cluster_ward, patientID)
+
+# 5. Display the Result
+print(comparison_stroben_filt)
+
+table("ilaria_clust" = comparison_stroben_filt$cluster, "valerio_clust" = comparison_stroben_filt$cluster_ward)
+```
+
+# Survival analysis
+
+```{r}
+ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+```
+
+
+```{r}
+df_combined_filt <- ov_meta |> 
+  # Select only the columns we want to add from the first df
+  inner_join(df_clust_filt |> dplyr::select(patientID, cluster_kmean, cluster_ward), by = "patientID")
+```
+
+```{r}
+set.seed(42)
+fit_filt <- survfit(Surv(time, vital_status) ~ cluster_kmean, data = df_combined_filt)
+(km_plot_filt <- ggsurvplot(fit_filt, data = df_combined_filt, risk.table = TRUE, pval = TRUE, xlim = c(0,3000)))
+pairwise_survdiff(Surv(time, vital_status) ~ cluster_kmean, data = df_combined_filt)
+```
+
+# Sketching
+
+```{r}
+sketch_spatial_fast <- function(ppp_obj, idx, n_target) {
+  if (length(idx) <= n_target) return(idx)
+  
+  # Corrected math: Number of bins per axis should be the square root 
+  # of the total desired boxes (n_target * 5)
+  grid_res <- ceiling(sqrt(n_target * 5))
+  
+  # Get coordinates
+  x_coords <- ppp_obj$x[idx]
+  y_coords <- ppp_obj$y[idx]
+  
+  # Assign each point to an X and Y grid bin
+  x_bin <- findInterval(x_coords, seq(min(x_coords), max(x_coords), length.out = grid_res))
+  y_bin <- findInterval(y_coords, seq(min(y_coords), max(y_coords), length.out = grid_res))
+  
+  # Create a unique ID for each grid square
+  grid_id <- paste(x_bin, y_bin, sep = "_")
+  
+  # Shuffle the data randomly
+  shuffled_order <- sample(length(idx))
+  idx_shuffled <- idx[shuffled_order]
+  grid_id_shuffled <- grid_id[shuffled_order]
+  
+  # By taking the first occurrence of each grid_id, we get exactly 1 random cell per grid square!
+  kept_idx <- idx_shuffled[!duplicated(grid_id_shuffled)]
+  
+  # If the grid gave us more points than n_target, randomly downsample to exactly n_target
+  if (length(kept_idx) > n_target) {
+    kept_idx <- sample(kept_idx, n_target)
+  }
+  
+  return(kept_idx)
+}
+```
+
+```{r}
+# Pure R Spatial Sketching Function
+sketch_spatial_R <- function(ppp_obj, idx, n_target) {
+  if (length(idx) <= n_target) return(idx)
+  
+  # Extract X and Y coordinates for these specific points
+  coords <- cbind(x = ppp_obj$x[idx], y = ppp_obj$y[idx])
+  
+  # Cluster the physical space into 'n_target' even regions
+  # Using MacQueen algorithm because it is blazingly fast for 2D coordinates
+  km <- kmeans(coords, centers = n_target, algorithm = "MacQueen", iter.max = 15)
+  
+  # Pick one random cell from each spatial cluster
+  # This forces the downsampled cells to perfectly trace the tissue structure
+  sketched_rel_idx <- tapply(seq_along(idx), km$cluster, function(x) sample(x, 1))
+  
+  return(idx[sketched_rel_idx])
+}
+```
+
+
+```{r}
+Lcross_personal <- function(ppp_obj, mark_i, mark_j, mark_column, downsample = TRUE, downsample_method = c("sketch_R", "sketch_fast", "standard"), n_down = 10000, ...) {
+  
+  # Ensure a valid method is selected (defaults to "sketch_R" if none is specified)
+  downsample_method <- match.arg(downsample_method)
+  
+  # 0. If marks are a dataframe, extract the specific column we want to use
+  if (is.data.frame(marks(ppp_obj))) {
+    marks(ppp_obj) <- marks(ppp_obj)[[mark_column]]
+  }
+  
+  # 1. Get the indices of the specific cell types dynamically
+  idx_i <- which(marks(ppp_obj) == mark_i)
+  idx_j <- which(marks(ppp_obj) == mark_j)
+  
+  if(length(idx_i) < 2 | length(idx_j) < 2) {
+    warning(paste("Not enough points for", mark_i, "and/or", mark_j, "to compute Lcross. Returning NULL."))
+    return(NULL)
+  }
+  
+  # 2. Handle Downsampling
+  if (downsample) {
+    if (downsample_method == "sketch_R") {
+      # MacQueen k-means sketching
+      keep_i <- sketch_spatial_R(ppp_obj, idx_i, n_down)
+      keep_j <- sketch_spatial_R(ppp_obj, idx_j, n_down)
+      
+    } else if (downsample_method == "sketch_fast") {
+      # Fast grid-based sketching (requires ppp_obj to be passed)
+      keep_i <- sketch_spatial_fast(ppp_obj, idx_i, n_down)
+      keep_j <- sketch_spatial_fast(ppp_obj, idx_j, n_down)
+      
+    } else if (downsample_method == "standard") {
+      # Standard random downsampling
+      keep_i <- sample(idx_i, min(length(idx_i), n_down))
+      keep_j <- sample(idx_j, min(length(idx_j), n_down))
+    }
+    
+    # Subset the ppp object
+    ppp_sub <- ppp_obj[c(keep_i, keep_j)]
+    
+  } else {
+    ppp_sub <- ppp_obj[c(idx_i, idx_j)]
+  }
+  
+  # 3. Calculate Lcross
+  L <- Lcross(ppp_sub, i = mark_i, j = mark_j, ...)
+  
+  return(L)
+}
+```
+
+```{r}
+Lcross_sketch <- map(ppp_list, \(ppp_obj) {
+  Lcross_personal(ppp_obj, 
+                  mark_i = "neoplastic", 
+                  mark_j = "stromal_benign", 
+                  mark_column = "merged_type", 
+                  downsample = TRUE, 
+                  downsample_method = "sketch_fast",
+                  n_down = 10000, rmax = 100, 
+                  correction = "border", r = r_values)
+})
+Lcross_sketch <- Lcross_sketch[names(Lcross_sketch) != "TCGA-23-1121-01Z-00-DX1.E2F25441-32C3-46BF-A845-CB4FA787E8CB"]
+```
+
+```{r}
+plot_colored <- plot_fv_list(
+  list_of_funcs = Lcross_sketch, 
+  comparison_df = meta_ilaria, 
+  correction = "border"
+)
+
+plot_colored
+```
+
+### Remove the outliner
+
+```{r}
+Lcross_sketch <- Lcross_sketch[names(Lcross_sketch) != "TCGA-23-1121-01Z-00-DX1.E2F25441-32C3-46BF-A845-CB4FA787E8CB"]
+```
+
+
+```{r}
+Lfun_sketch <- fsmooth(Lcross_sketch, centrata = T)
+```
+
+```{r}
+plot(Lfun_sketch$fd)
+lines(c(0,100), c(0,0), col = "gold", lwd = 2)
+```
+
+```{r}
+fpca_sk <- pca.fd(Lfun_sketch$fd, nharm = 4, Lfun_sketch$fdPar)
+rownames(fpca_sk$scores) <- names(Lcross_sketch) # "nome" dei pazienti (numero del paziente)
+
+set.seed(123)
+fpca_km_sk <- kmeans(fpca_sk$scores[,c(1,4)], 4)
+fpca_hc_sk <- hclust(dist(fpca_sk$scores[,c(1,4)]), method = "ward.D2")
+memb_sk <- cutree(fpca_hc_sk, k = 4)
+
+table(kmean = fpca_km_sk$cluster)
+table(ward.d2 = memb_sk)
+
+
+```
+
+```{r}
+plot(fpca_sk$scores[,1], fpca_sk$scores[,2], col = fpca_km_sk$cluster, pch = 3, main = "kmeans")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+plot(fpca_sk$scores[,1], fpca_sk$scores[,2], col = memb_sk, pch = 3, main = "Ward.d2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+```
+
+```{r}
+df_ilaria <- meta_ilaria |> 
+  dplyr::select(patientID, cluster)
+# 3. Clean Dataset B to match IDs
+# We extract the first 12 characters (e.g., "TCGA-25-1326")
+df_clust_sketch <- data.frame(
+  patientID = substr(names(memb_sk), 1, 12),
+  cluster_kmean = fpca_km_sk$cluster,
+  cluster_ward = memb_sk
+) |> print()
+
+# 4. Merge to find correspondence
+comparison_sketch <- inner_join(df_ilaria, df_clust_sketch, by = "patientID") |> 
+  arrange(cluster_ward, patientID)
+
+# 5. Display the Result
+print(comparison_sketch)
+
+table("ilaria_clust" = comparison_sketch$cluster, "valerio_ward" = comparison_sketch$cluster_ward)
+table("ilaria_clust" = comparison_sketch$cluster, "valerio_kmean" = comparison_sketch$cluster_kmean)
+```
+
+## Survival analysis
+
+```{r}
+ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+```
+
+
+```{r}
+df_combined_sketch <- ov_meta |> 
+  # Select only the columns we want to add from the first df
+  inner_join(df_clust_sketch |> dplyr::select(patientID, cluster_kmean), by = "patientID")
+```
+
+```{r}
+set.seed(42)
+fit <- survfit(Surv(time, vital_status) ~ cluster_kmean, data = df_combined_sketch)
+(km_plot <- ggsurvplot(fit, data = df_combined_sketch, risk.table = TRUE, pval = TRUE, xlim = c(0,3000)))
+pairwise_survdiff(Surv(time, vital_status) ~ cluster_kmean, data = df_combined_sketch)
+```
+
+COSE DA FARE:
+
+dopo aver rimosso casi strani, prendo tutti i pazienti e faccio tutta la pipe
+con i gruppi di clustering faccio survival. 
+
+sketching: subsampling 50k cells, ribilianciare i punti con pesi
+
+unisco benign e stromal
+match i neoplastic con le altre.
