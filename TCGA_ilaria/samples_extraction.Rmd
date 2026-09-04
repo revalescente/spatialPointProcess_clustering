@@ -236,7 +236,6 @@ which.min(plot_data$PC1)
 which.max(plot_data$PC1)
 which.max(plot_data$PC2)
 which.min(plot_data$PC2)
-
 ```
 
 

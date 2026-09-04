@@ -258,6 +258,18 @@ filtered_plots <- imap(ppp_list, poinside_plot)
 filtered_plots
 ```
 
+# subset of samples
+
+```{r}
+sample_idx <- c("062921_D0_m3a_0_1", "082421_D0_m6_3_1", "092421_D3_m1_4_1", "092421_D3_m2_5_1", 
+                "092421_D3_m3_6_1", "062221_D9_m3_8_3", "100221_D9_m3_10_1", "062921_D9_m2a_12_1", 
+                "062921_D9_m5_14_2", "082421_D21_m1_17_2", "082421_D21_m2_18_1")
+```
+
+```{r}
+sub_ppp <- ppp_list[names(ppp_list) %in% sample_idx]
+```
+
 
 # Second order statistic analysis
 
@@ -267,7 +279,7 @@ filtered_plots
 
 Between Fibroblast and Epithelial
 ```{r}
-Lcross_FibEp <- map(ppp_list, \(ppp_obj) {
+Lcross_FibEp <- map(sub_ppp, \(ppp_obj) {
      # Calculate Lcross
      L <- Lcross(ppp_obj, i = "Fibroblast", j = "Epithelial", correction = "border", rmax = 12)
      L
@@ -353,7 +365,7 @@ plot_fv_list <- function(list_of_funcs, spe, correction = "border") {
   # 4. Plot with color mapped to sample_type
   p <- ggplot(df_lcross, aes(x = r, y = L_r_minus_r, group = Slide, color = sample_type)) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-    geom_line(alpha = 0.7, linewidth = 0.6) + 
+    geom_line(alpha = 0.7, linewidth = 1.5) + 
     theme_minimal() +
     labs(
       title = paste0("L-cross Function: ", df_lcross$mark_i[1], " vs ", df_lcross$mark_j[1]),
@@ -466,12 +478,12 @@ Grafico del dendogramma per il clustering gerarchico, scegliamo di dividere in 5
 
 ```{r}
 dhc <- as.dendrogram(fpca_hc)
-table(kmean = fpca_km$cluster)
+table(kmean = fpca_km$cluster, conditions = $sample_type)
 table(ward.d2 = memb)
 ```
 
 ```{r}
-plot(fpca$scores[,1], fpca$scores[,2], col = fpca_km$cluster, pch = 3, main = "kmeans")
+plot(fpca$scores[,1], fpca$scores[,2], pch = 3, main = "kmeans")
 abline(v = 0, lty = "dashed", col = "grey")
 abline(h = 0, lty = "dashed", col = "grey")
 plot(fpca$scores[,1], fpca$scores[,2], col = memb, pch = 3, main = "Ward.d2")

@@ -17,8 +17,8 @@ library(patchwork)
 library(spatstat.geom)
 library(spatstat)
 library(sosta)
-library(purrr)
 library(readxl)
+library(purrr)
 library(dplyr)
 library(spatialFDA)
 library(fda)
@@ -38,7 +38,7 @@ img_path <- "/mnt/ganimede/shared/imageFeatureTCGA_OV/hovernet/thumb"
 
 Extract from xlsx file the info about mpp conversion
 ```{r}
-xlsx_path <- "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_data/image_metadata_TCGA.xlsx"
+xlsx_path <- "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_dataset/TCGA_data/image_metadata_TCGA.xlsx"
 
 # 2. Read the excel file
 metadata <- read_excel(xlsx_path)
@@ -101,7 +101,7 @@ HoverNet masks saving and reading
 ## Metadata 
 
 ```{r}
-metadata <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+metadata <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_dataset/TCGA_data/survival_dataset_&_metadata.rds")
 ```
 
 
@@ -397,8 +397,8 @@ Iterative reading and acting with ppp samples
 # Read the ppp objects
 
 ```{r}
-sample_names <- readRDS(file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/samples_name.rds")
-path_dir = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/samples_ppp"
+sample_names <- readRDS(file = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_dataset/samples_name.rds")
+path_dir = "/mnt/europa/valerio/repositories/spatialPointProcess_clustering/dataset/TCGA_dataset/samples_ppp"
 ppp_list <- purrr::map(sample_names, \(sample_name){
     file_path <- file.path(path_dir, paste0(sample_name, ".rds"))
     ppp_sample <- readRDS(file_path)
@@ -442,9 +442,6 @@ map(ppp_list, poinside_plot)
 
 npoints for each cell type and potential RAM cost
 ```{r eval=FALSE, include=FALSE}
-library(spatstat)
-library(purrr)
-
 # Define a safe threshold based on your RAM (e.g., 100 million pairs is usually safe for 16GB RAM)
 # You might need to lower this to 50,000,000 if you have less RAM or other programs open.
 MAX_PAIRS_THRESHOLD <- 100 * 10^6 
@@ -478,7 +475,6 @@ cost_npoints <- map(ppp_list, function(ppp_obj) {
 
 Check if Lcross will crash - all unsupervised copilot code 
 ```{r eval=FALSE, include=FALSE}
-library(spatstat)
 library(scales) # For readable formatting (e.g., "1.2 GB")
 
 estimate_lcross_memory <- function(ppp_obj, type_i, type_j, available_ram_gb = 60) {
@@ -799,7 +795,7 @@ plot_fv_list <- function(list_of_funcs, comparison_df, correction = "border") {
 
 load the comparison_df
 ```{r}
-meta_ilaria <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+meta_ilaria <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_dataset/TCGA_data/survival_dataset_&_metadata.rds")
 ```
 
 
@@ -1017,7 +1013,7 @@ table("benign_clust" = comparison_benign$cluster_kmean, "stroma_cluster" = compa
 # Survival analysis
 
 ```{r}
-ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_dataset/TCGA_data/survival_dataset_&_metadata.rds")
 ```
 
 
@@ -1098,7 +1094,7 @@ table("ilaria_clust" = comparison_stroben_filt$cluster, "valerio_clust" = compar
 # Survival analysis
 
 ```{r}
-ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_data/survival_dataset_&_metadata.rds")
+ov_meta <- readRDS("~/repositories/spatialPointProcess_clustering/dataset/TCGA_dataset/TCGA_data/survival_dataset_&_metadata.rds")
 ```
 
 
